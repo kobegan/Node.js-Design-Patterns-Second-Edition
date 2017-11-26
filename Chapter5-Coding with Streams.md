@@ -299,3 +299,93 @@ cat <path to a file> | node readStdin
 这是流式范例是一个通用接口的一个很好的例子，它使得我们的程序能够进行通信，而不管它们是用什么语言写的。
 
 ##### flowing模式（流动模式）
+从`Streams`中读取的另一种方法是将侦听器附加到`data`事件；这会将`Streams`切换为`flowing`模式，其中数据不是使用`read()`函数来提取的，而是一旦有数据到达`data`监听器就被推送到监听器内。例如，我们之前创建的`readStdin`应用程序将使用流动模式：
+
+```javascript
+process.stdin
+  .on('data', chunk => {
+    console.log('New data available');
+    console.log(
+      `Chunk read: (${chunk.length}) "${chunk.toString()}"`
+    );
+  })
+  .on('end', () => process.stdout.write('End of stream'));
+```
+
+`flowing`模式是旧版`Streams`接口（也称为`Streams1`）的继承，其灵活性较低，`API`较少。随着`Streams2`接口的引入，`flowing`模式不是默认的工作模式，要启用它，需要将侦听器附加到`data`事件或显式调用`resume()`方法。 要暂时中断`Streams`触发`data`事件，我们可以调用`pause()`方法，导致任何传入数据缓存在内部`buffer`中。
+
+> 调用pause()不会导致Streams切换回non-flowing模式。
+
+#### 实现可读的Streams
+现在我们知道如何从`Streams`中读取数据，下一步是学习如何实现一个新的`Readable`数据流。为此，有必要通过继承`stream.Readable`的原型来创建一个新的类。 具体流必须提供`_read()`方法的实现：
+
+```javascript
+readable._read(size)
+```
+
+`Readable`类的内部将调用`_read()`方法，而该方法又将启动
+使用`push()`填充内部缓冲区：
+
+> 请注意，read()是Stream消费者调用的方法，而_read()是一个由Stream子类实现的方法，不能直接调用。下划线通常表示该方法为私有方法，不应该直接调用。
+
+为了演示如何实现新的可读`Streams`，我们可以尝试实现一个生成随机字符串的`Streams`。 我们来创建一个名为`randomStream.js`的新模块，它将包含我们的字符串的`generator`的代码：
+
+```javascript
+const stream = require('stream');
+const Chance = require('chance');
+
+const chance = new Chance();
+
+class RandomStream extends stream.Readable {
+  constructor(options) {
+    super(options);
+  }
+
+  _read(size) {
+    const chunk = chance.string(); //[1]
+    console.log(`Pushing chunk of size: ${chunk.length}`);
+    this.push(chunk, 'utf8'); //[2]
+    if (chance.bool({
+        likelihood: 5
+      })) { //[3]
+      this.push(null);
+    }
+  }
+}
+
+module.exports = RandomStream;
+```
+
+在文件顶部，我们将加载我们的依赖关系。除了我们正在加载一个[chance的npm模块](https://npmjs.org/package/chance)之外，没有什么特别之处，它是一个用于生成各种随机值的库，从数字到字符串到整个句子都能生成随机值。
+
+下一步是创建一个名为`RandomStream`的新类，并指定`stream.Readable`作为其父类。 在前面的代码中，我们调用父类的构造函数来初始化其内部状态，并将收到的`options`参数作为输入。通过`options`对象传递的可能参数包括以下内容：
+
+* 用于将`Buffers`转换为`Strings`的`encoding`参数（默认值为`null`）
+* 是否启用对象模式（`objectMode`默认为`false`）
+* 存储在内部`buffer`区中的数据的上限，一旦超过这个上限，则暂停从`data source`读取（`highWaterMark`默认为`16KB`）
+
+好的，现在让我们来解释一下我们重写的`stream.Readable`类的`_read()`方法：
+
+* 该方法使用`chance`生成随机字符串。
+* 它将字符串`push`内部`buffer`。 请注意，由于我们`push`的是`String`，此外我们还指定了编码为`utf8`（如果数据块只是一个二进制`Buffer`，则不需要）。
+* 以`5%`的概率随机中断`stream`的随机字符串产生，通过`push` `null`到内部`Buffer`来表示`EOF`，即`stream`的结束。
+
+我们还可以看到在`_read()`函数的输入中给出的`size`参数被忽略了，因为它是一个建议的参数。 我们可以简单地把所有可用的数据都`push`到内部的`buffer`中，但是如果在同一个调用中有多个推送，那么我们应该检查`push()`是否返回`false`，因为这意味着内部`buffer`已经达到了`highWaterMark`限制，我们应该停止添加更多的数据。
+
+以上就是`RandomStream`模块，我们现在准备好使用它。我们来创建一个名为`generateRandom.js`的新模块，在这个模块中我们实例化一个新的`RandomStream`对象并从中提取一些数据：
+
+```javascript
+const RandomStream = require('./randomStream');
+const randomStream = new RandomStream();
+
+randomStream.on('readable', () => {
+  let chunk;
+  while ((chunk = randomStream.read()) !== null) {
+    console.log(`Chunk received: ${chunk.toString()}`);
+  }
+});
+```
+
+现在，一切都准备好了，我们尝试新的自定义的`stream`。 像往常一样简单地执行`generateRandom`模块，观察随机的字符串在屏幕上流动。
+
+### 可写的Streams
