@@ -389,3 +389,174 @@ randomStream.on('readable', () => {
 现在，一切都准备好了，我们尝试新的自定义的`stream`。 像往常一样简单地执行`generateRandom`模块，观察随机的字符串在屏幕上流动。
 
 ### 可写的Streams
+一个可写的`stream`表示一个数据终点，在`Node.js`中，它使用`stream`模块中的`Writable`抽象类来实现。
+
+#### 写入一个stream
+把一些数据放在可写入的`stream`中是一件简单的事情， 我们所要做的就是使用`write()`方法，它具有以下格式：
+
+```javascript
+writable.write(chunk, [encoding], [callback])
+```
+
+`encoding`参数是可选的，其在`chunk`是`String`类型时指定（默认为`utf8`，如果`chunk`是`Buffer`，则忽略）；当数据块被刷新到底层资源中时，`callback`就会被调用，`callback`参数也是可选的。
+
+为了表示没有更多的数据将被写入`stream`中，我们必须使用`end()`方法：
+
+```javascript
+writable.end([chunk], [encoding], [callback])
+```
+
+我们可以通过`end()`方法提供最后一块数据。在这种情况下，`callbak`函数相当于为`finish`事件注册一个监听器，当数据块全部被写入`stream`中时，会触发该事件。
+
+现在，让我们通过创建一个输出随机字符串序列的小型`HTTP`服务器来演示这是如何工作的：
+
+```javascript
+const Chance = require('chance');
+const chance = new Chance();
+
+require('http').createServer((req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/plain'
+  }); //[1]
+  while (chance.bool({
+      likelihood: 95
+    })) { //[2]
+    res.write(chance.string() + '\n'); //[3]
+  }
+  res.end('\nThe end...\n'); //[4]
+  res.on('finish', () => console.log('All data was sent')); //[5]
+}).listen(8080, () => console.log('Listening on http://localhost:8080'));
+```
+
+我们创建了一个`HTTP服务器`，并把数据写入`res`对象，`res`对象是`http.ServerResponse`的一个实例，也是一个可写入的`stream`。下面来解释上述代码发生了什么：
+
+1. 我们首先写`HTTP response`的头部。请注意，`writeHead()`不是`Writable`接口的一部分，实际上，这个方法是`http.ServerResponse`类公开的辅助方法。
+2. 我们开始一个`5％`的概率终止的循环（进入循环体的概率为`chance.bool()`产生，其为`95％`）。
+3. 在循环内部，我们写入一个随机字符串到`stream`。
+4. 一旦我们不在循环中，我们调用`stream`的`end()`，表示没有更多
+数据块将被写入。另外，我们在结束之前提供一个最终的字符串写入流中。
+5. 最后，我们注册一个`finish`事件的监听器，当所有的数据块都被刷新到底层`socket`中时，这个事件将被触发。
+
+我们可以调用这个小模块称为`entropyServer.js`，然后执行它。要测试这个服务器，我们可以在地址`http：// localhost:8080`打开一个浏览器，或者从终端使用`curl`命令，如下所示：
+
+```bash
+curl localhost:8080
+```
+
+此时，服务器应该开始向您选择的`HTTP客户端`发送随机字符串（请注意，某些浏览器可能会缓冲数据，并且流式传输行为可能不明显）。
+
+#### Back-pressure（反压）
+类似于在真实管道系统中流动的液体，`Node.js`的`stream`也可能遭受瓶颈，数据写入速度可能快于`stream`的消耗。 解决这个问题的机制包括缓冲输入数据；然而，如果数据`stream`没有给生产者任何反馈，我们可能会产生越来越多的数据被累积到内部缓冲区的情况，导致内存泄露的发生。
+
+为了防止这种情况的发生，当内部`buffer`超过`highWaterMark`限制时，`writable.write()`将返回`false`。 可写入的`stream`具有`highWaterMark`属性，这是`write()`方法开始返回`false`的内部`Buffer`区大小的限制，一旦`Buffer`区的大小超过这个限制，表示应用程序应该停止写入。 当缓冲器被清空时，会触发一个叫做`drain`的事件，通知再次开始写入是安全的。 这种机制被称为`back-pressure`。
+
+> 本节介绍的机制同样适用于可读的stream。事实上，在可读流中也存在back-pressure，并且在_read()内调用的push()方法返回false时触发。 但是，这对于stream实现者来说是一个特定的问题，所以我们将不经常处理它。
+
+我们可以通过修改之前创建的`entropyServer`模块来演示可写入的`stream`的`back-pressure`：
+
+```javascript
+const Chance = require('chance');
+const chance = new Chance();
+
+require('http').createServer((req, res) => {
+  res.writeHead(200, {
+    'Content-Type': 'text/plain'
+  });
+
+  function generateMore() { //[1]
+    while (chance.bool({
+        likelihood: 95
+      })) {
+      const shouldContinue = res.write(
+        chance.string({
+          length: (16 * 1024) - 1
+        }) //[2]
+      );
+      if (!shouldContinue) { //[3]
+        console.log('Backpressure');
+        return res.once('drain', generateMore);
+      }
+    }
+    res.end('\nThe end...\n', () => console.log('All data was sent'));
+  }
+  generateMore();
+}).listen(8080, () => console.log('Listening on http://localhost:8080'));
+```
+
+前面代码中最重要的步骤可以概括如下：
+
+1. 我们将主逻辑封装在一个名为`generateMore()`的函数中。
+2. 为了增加获得一些`back-pressure`的机会，我们将数据块的大小增加到`16KB-1Byte`，这非常接近默认的`highWaterMark`限制。
+3. 在写入一大块数据之后，我们检查`res.write()`的返回值。 如果它返回`false`，这意味着内部`buffer`已满，我们应该停止发送更多的数据。在这种情况下，我们从函数中退出，然后新注册一个写入事件的发布者，当`drain`事件触发时调用`generateMore`。
+
+如果我们现在尝试再次运行服务器，然后使用`curl`生成客户端请求，则很可能会有一些`back-pressure`，因为服务器以非常高的速度生成数据，速度甚至会比底层`socket`更快。
+
+#### 实现可写入的Streams
+我们可以通过继承`stream.Writable`类来实现一个新的可写入的流，并为`_write()`方法提供一个实现。实现一个我们自定义的可写入的`Streams`类。
+
+让我们构建一个可写入的`stream`，它接收对象的格式如下：
+
+```
+{
+  path: <path to a file>
+  content: <string or buffer>
+}
+```
+
+这个类的作用是这样的：对于每一个对象，我们的`stream`必须将`content`部分保存到在给定路径中创建的文件中。 我们可以立即看到，我们`stream`的输入是对象，而不是`Strings`或`Buffers`，这意味着我们的`stream`必须以对象模式工作。
+
+调用模块`toFileStream.js`：
+
+```javascript
+const stream = require('stream');
+const fs = require('fs');
+const path = require('path');
+const mkdirp = require('mkdirp');
+
+class ToFileStream extends stream.Writable {
+  constructor() {
+    super({
+      objectMode: true
+    });
+  }
+
+  _write(chunk, encoding, callback) {
+    mkdirp(path.dirname(chunk.path), err => {
+      if (err) {
+        return callback(err);
+      }
+      fs.writeFile(chunk.path, chunk.content, callback);
+    });
+  }
+}
+module.exports = ToFileStream;
+```
+
+作为第一步，我们加载所有我们所需要的依赖包。注意，我们需要模块`mkdirp`，正如你应该从前几章中所知道的，它应该使用`npm`安装。
+
+我们创建了一个新类，它从`stream.Writable`扩展而来。
+
+我们不得不调用父构造函数来初始化其内部状态；我们还提供了一个`option`对象作为参数，用于指定流在对象模式下工作（`objectMode：true`）。`stream.Writable`接受的其他选项如下：
+
+* `highWaterMark`（默认值是`16KB`）：控制`back-pressure`的上限。
+* `decodeStrings`（默认为`true`）：在字符串传递给`_write()`方法之前，将字符串自动解码为二进制`buffer`区。 在对象模式下这个参数被忽略。
+
+最后，我们为`_write()`方法提供了一个实现。正如你所看到的，这个方法接受一个数据块，一个编码（只有在二进制模式下，`stream`选项`decodeStrings`设置为`false`时才有意义）。
+
+另外，该方法接受一个回调函数，该函数在操作完成时需要调用；而不必要传递操作的结果，但是如果需要的话，我们仍然可以传递一个`error`对象，这将导致`stream`触发`error`事件。
+
+现在，为了尝试我们刚刚构建的`stream`，我们可以创建一个名为`writeToFile.js`的新模块，并对该流执行一些写操作：
+
+```javascript
+const ToFileStream = require('./toFileStream.js');
+const tfs = new ToFileStream();
+
+tfs.write({path: "file1.txt", content: "Hello"});
+tfs.write({path: "file2.txt", content: "Node.js"});
+tfs.write({path: "file3.txt", content: "Streams"});
+tfs.end(() => console.log("All files created"));
+```
+
+有了这个，我们创建并使用了我们的第一个自定义的可写入流。 像往常一样运行新模块来检查其输出；你会看到执行后会创建三个新文件。
+
+### 双重的Streams
