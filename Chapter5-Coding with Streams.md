@@ -450,7 +450,7 @@ curl localhost:8080
 
 为了防止这种情况的发生，当内部`buffer`超过`highWaterMark`限制时，`writable.write()`将返回`false`。 可写入的`stream`具有`highWaterMark`属性，这是`write()`方法开始返回`false`的内部`Buffer`区大小的限制，一旦`Buffer`区的大小超过这个限制，表示应用程序应该停止写入。 当缓冲器被清空时，会触发一个叫做`drain`的事件，通知再次开始写入是安全的。 这种机制被称为`back-pressure`。
 
-> 本节介绍的机制同样适用于可读的stream。事实上，在可读流中也存在back-pressure，并且在_read()内调用的push()方法返回false时触发。 但是，这对于stream实现者来说是一个特定的问题，所以我们将不经常处理它。
+> 本节介绍的机制同样适用于可读的stream。事实上，在可读stream中也存在back-pressure，并且在_read()内调用的push()方法返回false时触发。 但是，这对于stream实现者来说是一个特定的问题，所以我们将不经常处理它。
 
 我们可以通过修改之前创建的`entropyServer`模块来演示可写入的`stream`的`back-pressure`：
 
@@ -541,7 +541,7 @@ module.exports = ToFileStream;
 * `highWaterMark`（默认值是`16KB`）：控制`back-pressure`的上限。
 * `decodeStrings`（默认为`true`）：在字符串传递给`_write()`方法之前，将字符串自动解码为二进制`buffer`区。 在对象模式下这个参数被忽略。
 
-最后，我们为`_write()`方法提供了一个实现。正如你所看到的，这个方法接受一个数据块，一个编码（只有在二进制模式下，`stream`选项`decodeStrings`设置为`false`时才有意义）。
+最后，我们为`_write()`方法提供了一个实现。正如你所看到的，这个方法接受一个数据块，一个编码方式（只有在二进制模式下，`stream`选项`decodeStrings`设置为`false`时才有意义）。
 
 另外，该方法接受一个回调函数，该函数在操作完成时需要调用；而不必要传递操作的结果，但是如果需要的话，我们仍然可以传递一个`error`对象，这将导致`stream`触发`error`事件。
 
@@ -560,3 +560,110 @@ tfs.end(() => console.log("All files created"));
 有了这个，我们创建并使用了我们的第一个自定义的可写入流。 像往常一样运行新模块来检查其输出；你会看到执行后会创建三个新文件。
 
 ### 双重的Streams
+双重的`stream`既是可读的，也可写的。 当我们想描述一个既是数据源又是数据终点的实体时（例如`socket`），这就显得十分有用了。 双工流继承`stream.Readable`和`stream.Writable`的方法，所以它对我们来说并不新鲜。这意味着我们可以`read()`或`write()`数据，或者可以监听`readable`和`drain`事件。
+
+要创建一个自定义的双重`stream`，我们必须为`_read()`和`_write()`提供一个实现。传递给`Duplex()`构造函数的`options`对象在内部被转发给`Readable`和`Writable`的构造函数。`options`参数的内容与前面讨论的相同，`options`增加了一个名为`allowHalfOpen`值（默认为`true`），如果设置为`false`，则会导致只要`stream`的一方（`Readable`和`Writable`）结束，`stream`就结束了。
+
+> 为了使双重的stream在一方以对象模式工作，而在另一方以二进制模式工作，我们需要在流构造器中手动设置以下属性：
+
+```javascript
+this._writableState.objectMode
+this._readableState.objectMode
+```
+
+### 转换的Streams
+转换流是专门设计用于处理数据转换的一种特殊类型的双重`Streams`。
+
+在一个简单的双重`Streams`中，从`stream`中读取的数据和写入到其中的数据之间没有直接的关系（至少`stream`是不可知的）。 想想一个`TCP socket`，它只是向远程节点发送数据和从远程节点接收数据。`TCP socket`自身没有意识到输入和输出之间有任何关系。
+
+下图说明了双重`Streams`中的数据流：
+
+![](http://oczira72b.bkt.clouddn.com/17-11-28/19665538.jpg)
+
+另一方面，转换的`Streams`对从可写入端接收到的每个数据块应用某种转换，然后在其可读端使转换的数据可用。
+
+下图显示了数据如何在转换的`Streams`中流动：
+
+![](http://oczira72b.bkt.clouddn.com/17-11-28/57545819.jpg)
+
+从外面看，转换的`Streams`的接口与双重`Streams`的接口完全相同。但是，当我们想要构建一个新的双重`Streams`时，我们必须提供`_read()`和`_write()`方法，而为了实现一个新的变换流，我们必须填写另一对方法：`_transform()`和`_flush()`）。
+
+我们来演示如何用一个例子来创建一个新的转换的`Streams`。
+
+#### 实现转换的`Streams`
+我们来实现一个转换的`Streams`，它将替换给定所有出现的字符串。 要做到这一点，我们必须创建一个名为`replaceStream.js`的新模块。 让我们直接看怎么实现它：
+
+```javascript
+const stream = require('stream');
+const util = require('util');
+
+class ReplaceStream extends stream.Transform {
+  constructor(searchString, replaceString) {
+    super();
+    this.searchString = searchString;
+    this.replaceString = replaceString;
+    this.tailPiece = '';
+  }
+
+  _transform(chunk, encoding, callback) {
+    const pieces = (this.tailPiece + chunk)         //[1]
+      .split(this.searchString);
+    const lastPiece = pieces[pieces.length - 1];
+    const tailPieceLen = this.searchString.length - 1;
+
+    this.tailPiece = lastPiece.slice(-tailPieceLen);     //[2]
+    pieces[pieces.length - 1] = lastPiece.slice(0,-tailPieceLen);
+
+    this.push(pieces.join(this.replaceString));       //[3]
+    callback();
+  }
+
+  _flush(callback) {
+    this.push(this.tailPiece);
+    callback();
+  }
+}
+
+module.exports = ReplaceStream;
+```
+
+与往常一样，我们将从其依赖项开始构建模块。这次我们没有使用第三方模块。
+
+然后我们创建了一个从`stream.Transform`基类继承的新类。该类的构造函数接受两个参数：`searchString`和`replaceString`。 正如你所想象的那样，它们允许我们定义要匹配的文本以及用作替换的字符串。 我们还初始化一个将由`_transform()`方法使用的`tailPiece`内部变量。
+
+现在，我们来分析一下`_transform()`方法，它是我们新类的核心。`_transform()`方法与可写入的`stream`的`_write()`方法具有几乎相同的格式，但不是将数据写入底层资源，而是使用`this.push()`将其推入内部`buffer`，这与我们会在可读流的`_read()`方法中执行。这显示了转换的`Streams`的双方如何实际连接。
+
+`ReplaceStream`的`_transform()`方法实现了我们这个新类的核心。正常情况下，搜索和替换`buffer`区中的字符串是一件容易的事情；但是，当数据流式传输时，情况则完全不同，可能的匹配可能分布在多个数据块中。代码后面的程序可以解释如下：
+
+1. 我们的算法使用`searchString`函数作为分隔符来分割块。
+2. 然后，它取出分隔后生成的数组的最后一项`lastPiece`，并提取其最后一个字符`searchString.length - 1`。结果被保存到`tailPiece`变量中，它将会被作为下一个数据块的前缀。
+3. 最后，所有从`split()`得到的片段用`replaceString`作为分隔符连接在一起，并推入内部`buffer`区。
+
+当`stream`结束时，我们可能仍然有最后一个`tailPiece`变量没有被压入内部缓冲区。这正是`_flush()`方法的用途；它在`stream`结束之前被调用，并且这是我们最终有机会完成流或者在完全结束流之前推送任何剩余数据的地方。
+
+`_flush()`方法只需要一个回调函数作为参数，当所有的操作完成后，我们必须确保调用这个回调函数。完成了这个，我们已经完成了我们的`ReplaceStream`类。
+
+现在，是时候尝试新的`stream`。我们可以创建另一个名为`replaceStreamTest.js`的模块来写入一些数据，然后读取转换的结果：
+
+```javascript
+const ReplaceStream = require('./replaceStream');
+
+const rs = new ReplaceStream('World', 'Node.js');
+rs.on('data', chunk => console.log(chunk.toString()));
+
+rs.write('Hello W');
+rs.write('orld!');
+rs.end();
+```
+
+为了使得这个例子更复杂一些，我们把搜索词分布在两个不同的数据块上；然后，使用`flowing`动模式，我们从同一个`stream`中读取数据，记录每个已转换的块。运行前面的程序应该产生以下输出：
+
+```
+Hel
+lo Node.js
+!
+```
+
+> 有一个值得提及是，第五种类型的stream：stream.PassThrough。 与我们介绍的其他流类不同，PassThrough不是抽象的，可以直接实例化，而不需要实现任何方法。实际上，这是一个可转换的stream，它可以输出每个数据块，而不需要进行任何转换。
+
+### 使用管道连接Streams
