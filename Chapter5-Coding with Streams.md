@@ -572,7 +572,7 @@ this._readableState.objectMode
 ```
 
 ### 转换的Streams
-转换流是专门设计用于处理数据转换的一种特殊类型的双重`Streams`。
+转换的`Streams`是专门设计用于处理数据转换的一种特殊类型的双重`Streams`。
 
 在一个简单的双重`Streams`中，从`stream`中读取的数据和写入到其中的数据之间没有直接的关系（至少`stream`是不可知的）。 想想一个`TCP socket`，它只是向远程节点发送数据和从远程节点接收数据。`TCP socket`自身没有意识到输入和输出之间有任何关系。
 
@@ -590,7 +590,7 @@ this._readableState.objectMode
 
 我们来演示如何用一个例子来创建一个新的转换的`Streams`。
 
-#### 实现转换的`Streams`
+#### 实现转换的Streams
 我们来实现一个转换的`Streams`，它将替换给定所有出现的字符串。 要做到这一点，我们必须创建一个名为`replaceStream.js`的新模块。 让我们直接看怎么实现它：
 
 ```javascript
@@ -656,7 +656,7 @@ rs.write('orld!');
 rs.end();
 ```
 
-为了使得这个例子更复杂一些，我们把搜索词分布在两个不同的数据块上；然后，使用`flowing`动模式，我们从同一个`stream`中读取数据，记录每个已转换的块。运行前面的程序应该产生以下输出：
+为了使得这个例子更复杂一些，我们把搜索词分布在两个不同的数据块上；然后，使用`flowing`模式，我们从同一个`stream`中读取数据，记录每个已转换的块。运行前面的程序应该产生以下输出：
 
 ```
 Hel
@@ -667,3 +667,74 @@ lo Node.js
 > 有一个值得提及是，第五种类型的stream：stream.PassThrough。 与我们介绍的其他流类不同，PassThrough不是抽象的，可以直接实例化，而不需要实现任何方法。实际上，这是一个可转换的stream，它可以输出每个数据块，而不需要进行任何转换。
 
 ### 使用管道连接Streams
+`Unix`管道的概念是由`Douglas Mcllroy`发明的；这使程序的输出能够连接到下一个的输入。看看下面的命令：
+
+```bash
+echo Hello World! | sed s/World/Node.js/g
+```
+
+在前面的命令中，`echo`会将`Hello World!`写入标准输出，然后被重定向到`sed`命令的标准输入（因为有管道操作符 `|`）。 然后`sed`用`Node.js`替换任何`World`，并将结果打印到它的标准输出（这次是控制台）。
+
+以类似的方式，可以使用可读的`Streams`的`pipe()`方法将`Node.js`的`Streams`连接在一起，它具有以下接口：
+
+```javascript
+readable.pipe(writable, [options])
+```
+
+非常直观地，`pipe()`方法将从可读的`Streams`中发出的数据抽取到所提供的可写入的`Streams`中。 另外，当可读的`Streams`发出`end`事件（除非我们指定`{end：false}`作为`options`）时，可写入的`Streams`将自动结束。 `pipe()`方法返回作为参数传递的可写入的`Streams`，如果这样的`stream`也是可读的（例如双重或可转换的`Streams`），则允许我们创建链式调用。
+
+将两个`Streams`连接到一起时，则允许数据自动流向可写入的`Streams`，所以不需要调用`read()`或`write()`方法；但最重要的是不需要控制`back-pressure`，因为它会自动处理。
+
+举个简单的例子（将会有大量的例子），我们可以创建一个名为`replace.js`的新模块，它接受来自标准输入的文本流，应用替换转换，然后将数据返回到标准输出：
+
+```javascript
+const ReplaceStream = require('./replaceStream');
+process.stdin
+  .pipe(new ReplaceStream(process.argv[2], process.argv[3]))
+  .pipe(process.stdout);
+```
+
+上述程序将来自标准输入的数据传送到`ReplaceStream`，然后返回到标准输出。 现在，为了实践这个小应用程序，我们可以利用`Unix`管道将一些数据重定向到它的标准输入，如下所示：
+
+```bash
+echo Hello World! | node replace World Node.js
+```
+
+运行上述程序，会输出如下结果：
+
+```
+Hello Node.js
+```
+
+这个简单的例子演示了`Streams`（特别是文本`Streams`）是一个通用接口，管道几乎是构成和连接所有这些接口的通用方式。
+
+> `error`事件不会通过管道自动传播。举个例子，看如下代码片段：
+
+```javascript
+stream1
+  .pipe(stream2)
+  .on('error', function() {});
+```
+
+> 在前面的链式调用中，我们将只捕获来自`stream2`的错误，这是由于我们给其添加了`erorr`事件侦听器。这意味着，如果我们想捕获从`stream1`生成的任何错误，我们必须直接附加另一个错误侦听器。 稍后我们将看到一种可以实现共同错误捕获的另一种模式（合并`Streams`）。 此外，我们应该注意到，如果目标`Streams`（读取的`Streams`）发出错误，它将会对源`Streams`通知一个`error`，之后导致管道的中断。
+
+#### Streams如何通过管道
+到目前为止，我们创建自定义`Streams`的方式并不完全遵循`Node`定义的模式；实际上，从`stream`基类继承是违反`small surface area`的，并需要一些示例代码。 这并不意味着`Streams`设计得不好，实际上，我们不应该忘记，因为`Streams`是`Node.js`核心的一部分，所以它们必须尽可能地灵活，广泛拓展`Streams`以致于用户级模块能够将它们充分运用。
+
+然而，大多数情况下，我们并不需要原型继承可以给予的所有权力和可扩展性，但通常我们想要的仅仅是定义新`Streams`的一种快速开发的模式。`Node.js`社区当然也为此创建了一个解决方案。 一个完美的例子是[through2](https://npmjs.org/package/through2)，一个使得我们可以简单地创建转换的`Streams`的小型库。 通过`through2`，我们可以通过调用一个简单的函数来创建一个新的可转换的`Streams`：
+
+```javascript
+const transform = through2([options], [_transform], [_flush]);
+```
+
+类似的，[from2](https://npmjs.org/package/from2)也允许我们像下面这样创建一个可读的`Streams`：
+
+```javascript
+const readable = from2([options], _read);
+```
+
+接下来，我们将在本章其余部分展示它们的用法，那时，我们会清楚使用这些小型库的好处。
+
+> [through](https://npmjs.org/package/through)和[from](https://www.npmjs.com/package/from)是基于`Stream1`规范的顶层库。
+
+#### 基于Streams的异步控制流

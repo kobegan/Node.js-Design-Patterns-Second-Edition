@@ -33,5 +33,6 @@
 })();
 ```
 
-![](http://oczira72b.bkt.clouddn.com/17-11-24/84001158.jpg)
-![](http://oczira72b.bkt.clouddn.com/17-11-24/22050685.jpg)
+| 微信支付 | 支付宝 |
+| ------------- |:-------------:|
+| ![](http://oczira72b.bkt.clouddn.com/17-11-24/84001158.jpg) | ![](http://oczira72b.bkt.clouddn.com/17-11-24/22050685.jpg) |
