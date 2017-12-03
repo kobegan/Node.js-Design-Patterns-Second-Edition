@@ -737,4 +737,66 @@ const readable = from2([options], _read);
 
 > [through](https://npmjs.org/package/through)和[from](https://www.npmjs.com/package/from)是基于`Stream1`规范的顶层库。
 
-#### 基于Streams的异步控制流
+### 基于Streams的异步控制流
+通过我们已经介绍的例子，应该清楚的是，`Streams`不仅可以用来处理`I / O`，而且可以用作处理任何类型数据的优雅编程模式。 但优点并不止这些；还可以利用`Streams`来实现异步控制流，在本节将会看到。
+
+#### 顺序执行
+默认情况下，`Streams`将按顺序处理数据；例如，转换的`Streams`的`_transform()`函数在前一个数据块执行`callback()`之后才会进行下一块数据块的调用。这是`Streams`的一个重要属性，按正确顺序处理每个数据块至关重要，但是也可以利用这一属性将`Streams`实现优雅的传统控制流模式。
+
+代码总是比太多的解释要好得多，所以让我们来演示一下如何使用流来按顺序执行异步任务的例子。让我们创建一个函数来连接一组接收到的文件作为输入，确保遵守提供的顺序。我们创建一个名为`concatFiles.js`的新模块，并从其依赖开始：
+
+```javascript
+const fromArray = require('from2-array');
+const through = require('through2');
+const fs = require('fs');
+```
+
+我们将使用`through2`来简化转换的`Streams`的创建，并使用`from2-array`从一个对象数组中创建可读的`Streams`。
+接下来，我们可以定义`concatFiles()`函数：
+
+```javascript
+function concatFiles(destination, files, callback) {
+  const destStream = fs.createWriteStream(destination);
+  fromArray.obj(files)             //[1]
+    .pipe(through.obj((file, enc, done) => {   //[2]
+      const src = fs.createReadStream(file);
+      src.pipe(destStream, {end: false});
+      src.on('end', done); //[3]
+    }))
+    .on('finish', () => {         //[4]
+      destStream.end();
+      callback();
+    });
+}
+
+module.exports = concatFiles;
+```
+
+前面的函数通过将`files`数组转换为`Streams`来实现对`files`数组的顺序迭代。 该函数所遵循的程序解释如下：
+
+1. 首先，我们使用`from2-array`从`files`数组创建一个可读的`Streams`。
+2. 接下来，我们使用`through`来创建一个转换的`Streams`来处理序列中的每个文件。对于每个文件，我们创建一个可读的`Streams`，并通过管道将其输入到表示输出文件的`destStream`中。 在源文件完成读取后，通过在`pipe()`方法的第二个参数中指定`{end：false}`，我们确保不关闭`destStream`。
+3. 当源文件的所有内容都被传送到`destStream`时，我们调用`through.obj`公开的`done`函数来传递当前处理已经完成，在我们的情况下这是需要触发处理下一个文件。
+4. 所有文件处理完后，`finish`事件被触发。我们最后可以结束`destStream`并调用`concatFiles()`的`callback()`函数，这个函数表示整个操作的完成。
+
+我们现在可以尝试使用我们刚刚创建的小模块。让我们创建一个名为`concat.js`的新文件来完成一个示例：
+
+```javascript
+const concatFiles = require('./concatFiles');
+
+concatFiles(process.argv[2], process.argv.slice(3), () => {
+  console.log('Files concatenated successfully');
+});
+```
+
+我们现在可以运行上述程序，将目标文件作为第一个命令行参数，接着是要连接的文件列表，例如：
+
+```bash
+node concat allTogether.txt file1.txt file2.txt
+```
+
+执行这一条命令，会创建一个名为`allTogether.txt`的新文件，其中按顺序保存`file1.txt`和`file2.txt`的内容。
+
+使用`concatFiles()`函数，我们能够仅使用`Streams`实现异步操作的顺序执行。正如我们在`Chapter3 Asynchronous Control Flow Patters with Callbacks`中看到的那样，如果使用纯`JavaScript`实现，或者使用`async`等外部库，则需要使用或实现迭代器。我们现在提供了另外一个可以达到同样效果的方法，正如我们所看到的，它的实现方式非常优雅且可读性高。
+
+> 模式：使用Streams或Streams的组合，可以轻松地按顺序遍历一组异步任务。
