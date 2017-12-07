@@ -800,3 +800,118 @@ node concat allTogether.txt file1.txt file2.txt
 使用`concatFiles()`函数，我们能够仅使用`Streams`实现异步操作的顺序执行。正如我们在`Chapter3 Asynchronous Control Flow Patters with Callbacks`中看到的那样，如果使用纯`JavaScript`实现，或者使用`async`等外部库，则需要使用或实现迭代器。我们现在提供了另外一个可以达到同样效果的方法，正如我们所看到的，它的实现方式非常优雅且可读性高。
 
 > 模式：使用Streams或Streams的组合，可以轻松地按顺序遍历一组异步任务。
+
+#### 无序并行执行
+我们刚刚看到`Streams`按顺序处理每个数据块，但有时这可能并不能这么做，因为这样并没有充分利用`Node.js`的并发性。如果我们必须对每个数据块执行一个缓慢的异步操作，那么并行化执行这一组异步任务完全是有必要的。当然，只有在每个数据块之间没有关系的情况下才能应用这种模式，这些数据块可能经常发生在对象模式的`Streams`中，但是对于二进制模式的`Streams`很少使用无序的并行执行。
+
+> 注意：当处理数据的顺序很重要时，不能使用无序并行执行的Streams。
+
+为了并行化一个可转换的`Streams`的执行，我们可以运用`Chapter3 Asynchronous Control Flow Patters with Callbacks`所讲到的无序并行执行的相同模式，然后做出一些改变使它们适用于`Streams`。让我们看看这是如何更改的。
+
+##### 实现一个无序并行的Streams
+让我们用一个例子直接说明：我们创建一个叫做`parallelStream.js`的模块，然后自定义一个普通的可转换的`Streams`，然后给出一系列可转换流的方法：
+
+```javascript
+const stream = require('stream');
+
+class ParallelStream extends stream.Transform {
+  constructor(userTransform) {
+    super({objectMode: true});
+    this.userTransform = userTransform;
+    this.running = 0;
+    this.terminateCallback = null;
+  }
+
+  _transform(chunk, enc, done) {
+    this.running++;
+    this.userTransform(chunk, enc, this._onComplete.bind(this), this.push.bind(this));
+    done();
+  }
+
+  _flush(done) {
+    if(this.running > 0) {
+      this.terminateCallback = done;
+    } else {
+      done();
+    }
+  }
+
+  _onComplete(err) {
+    this.running--;
+    if(err) {
+      return this.emit('error', err);
+    }
+    if(this.running === 0) {
+      this.terminateCallback && this.terminateCallback();
+    }
+  }
+}
+
+module.exports = ParallelStream;
+```
+
+我们来分析一下这个新的自定义的类。正如你所看到的一样，构造函数接受一个`userTransform()`函数作为参数，然后将其另存为一个实例变量；我们也调用父构造函数，并且我们默认启用对象模式。
+
+接下来，来看`_transform()`方法，在这个方法中，我们执行`userTransform()`函数，然后增加当前正在运行的任务个数; 最后，我们通过调用`done()`来通知当前转换步骤已经完成。`_transform()`方法展示了如何并行处理另一项任务。我们不用等待`userTransform()`方法执行完毕再调用`done()`。 相反，我们立即执行`done()`方法。另一方面，我们提供了一个特殊的回调函数给`userTransform()`方法，这就是`this._onComplete()`方法；以便我们在`userTransform()`完成的时候收到通知。
+
+在`Streams`终止之前，会调用`_flush()`方法，所以如果仍有任务正在运行，我们可以通过不立即调用`done()`回调函数来延迟`finish`事件的触发。相反，我们将其分配给`this.terminateCallback`变量。为了理解`Streams`如何正确终止，来看`_onComplete()`方法。
+
+在每组异步任务最终完成时，`_onComplete()`方法会被调用。首先，它会检查是否有任务正在运行，如果没有，则调用`this.terminateCallback()`函数，这将导致`Streams`结束，触发`_flush()`方法的`finish`事件。
+
+利用刚刚构建的`ParallelStream`类可以轻松地创建一个无序并行执行的可转换的`Streams`实例，但是有个注意：它不会保留项目接收的顺序。实际上，异步操作可以在任何时候都有可能完成并推送数据，而跟它们开始的时刻并没有必然的联系。因此我们知道，对于二进制模式的`Streams`并不适用，因为二进制的`Streams`对顺序要求较高。
+
+##### 实现一个URL监控应用程序
+现在，让我们使用`ParallelStream`模块实现一个具体的例子。让我们想象以下我们想要构建一个简单的服务来监控一个大`URL`列表的状态，让我们想象以下，所有的这些`URL`包含在一个单独的文件中，并且每一个`URL`占据一个空行。
+
+`Streams`能够为这个场景提供一个高效且优雅的解决方案。特别是当我们使用我们刚刚写的`ParallelStream`类来无序地审核这些`URL`。
+
+接下来，让我们创建一个简单的放在`checkUrls.js`模块的应用程序。
+
+```javascript
+const fs = require('fs');
+const split = require('split');
+const request = require('request');
+const ParallelStream = require('./parallelStream');
+
+fs.createReadStream(process.argv[2])         //[1]
+  .pipe(split())                             //[2]
+  .pipe(new ParallelStream((url, enc, done, push) => {     //[3]
+    if(!url) return done();
+    request.head(url, (err, response) => {
+      push(url + ' is ' + (err ? 'down' : 'up') + '\n');
+      done();
+    });
+  }))
+  .pipe(fs.createWriteStream('results.txt'))   //[4]
+  .on('finish', () => console.log('All urls were checked'))
+;
+```
+
+正如我们所看到的，通过流，我们的代码看起来非常优雅，直观。 让我们看看它是如何工作的：
+
+1. 首先，我们通过给定的文件参数创建一个可读的`Streams`，便于接下来读取文件。
+2. 我们通过[split](https://npmjs.org/package/split)将输入的文件的`Streams`的内容输出一个可转换的`Streams`到管道中，并且分隔了数据块的每一行。
+3. 然后，是时候使用我们的`ParallelStream`来检查`URL`了，我们发送一个`HEAD`请求然后等待请求的`response`。当请求返回时，我们把请求的结果`push`到`stream`中。
+4. 最后，通过管道把结果保存到`results.txt`文件中。
+
+```bash
+node checkUrls urlList.txt
+```
+
+这里的文件`urlList.txt`包含一组`URL`，例如：
+
+* `http://www.mariocasciaro.me/`
+* `http://loige.co/`
+* `http://thiswillbedownforsure.com/`
+
+当应用执行完成后，我们可以看到一个文件`results.txt`被创建，里面包含有操作的结果，例如：
+
+* `http://thiswillbedownforsure.com is down`
+* `http://loige.co is up`
+* `http://www.mariocasciaro.me is up`
+
+输出的结果的顺序很有可能与输入文件中指定`URL`的顺序不同。这是`Streams`无序并行执行任务的明显特征。
+
+> 出于好奇，我们可能想尝试用一个正常的through2流替换ParallelStream，并比较两者的行为和性能（你可能想这样做的一个练习）。我们将会看到，使用through2的方式会比较慢，因为每个URL都将按顺序进行检查，而且文件results.txt中结果的顺序也会被保留。
+
+##### 无序限制并行执行
