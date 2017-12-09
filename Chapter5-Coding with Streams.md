@@ -914,4 +914,113 @@ node checkUrls urlList.txt
 
 > 出于好奇，我们可能想尝试用一个正常的through2流替换ParallelStream，并比较两者的行为和性能（你可能想这样做的一个练习）。我们将会看到，使用through2的方式会比较慢，因为每个URL都将按顺序进行检查，而且文件results.txt中结果的顺序也会被保留。
 
-##### 无序限制并行执行
+#### 无序限制并行执行
+如果运行包含数千或数百万个URL的文件的`checkUrls`应用程序，我们肯定会遇到麻烦。我们的应用程序将同时创建不受控制的连接数量，并行发送大量数据，并可能破坏应用程序的稳定性和整个系统的可用性。我们已经知道，控制负载的无序限制并行执行是一个极好的解决方案。
+
+让我们通过创建一个`limitedParallelStream.js`模块来看看它是如何工作的，这个模块是改编自上一节中创建的`parallelStream.js`模块。
+
+让我们看看它的构造函数：
+
+```javascript
+class LimitedParallelStream extends stream.Transform {
+  constructor(concurrency, userTransform) {
+    super({objectMode: true});
+    this.concurrency = concurrency;
+    this.userTransform = userTransform;
+    this.running = 0;
+    this.terminateCallback = null;
+    this.continueCallback = null;
+  }
+// ...
+}
+```
+
+
+我们需要一个`concurrency`变量作为输入来限制并发量，这次我们要保存两个回调函数，`continueCallback`用于任何挂起的`_transform`方法，`terminateCallback`用于_flush方法的回调。
+接下来看`_transform()`方法：
+
+```javascript
+_transform(chunk, enc, done) {
+  this.running++;
+  this.userTransform(chunk, enc,  this.push.bind(this), this._onComplete.bind(this));
+  if(this.running < this.concurrency) {
+    done();
+  } else {
+    this.continueCallback = done;
+  }
+}
+```
+
+这次在`_transform()`方法中，我们必须在调用`done()`之前检查是否达到了最大并行数量的限制，如果没有达到了限制，才能触发下一个项目的处理。如果我们已经达到最大并行数量的限制，我们可以简单地将`done()`回调保存到`continueCallback`变量中，以便在任务完成后立即调用它。
+
+`_flush()`方法与`ParallelStream`类保持完全一样，所以我们直接转到实现`_onComplete()`方法：
+
+```javascript
+_onComplete(err) {
+  this.running--;
+  if(err) {
+    return this.emit('error', err);
+  }
+  const tmpCallback = this.continueCallback;
+  this.continueCallback = null;
+  tmpCallback && tmpCallback();
+  if(this.running === 0) {
+    this.terminateCallback && this.terminateCallback();
+  }
+}
+```
+
+每当任务完成，我们调用任何已保存的`continueCallback()`将导致
+`stream`解锁，触发下一个项目的处理。
+
+这就是`limitedParallelStream`模块。 我们现在可以在`checkUrls`模块中使用它来代替`parallelStream`，并且将我们的任务的并发限制在我们设置的值上。
+
+#### 顺序并行执行
+我们以前创建的并行`Streams`可能会使得数据的顺序混乱，但是在某些情况下这是不可接受的。有时，实际上，有那种需要每个数据块都以接收到的相同顺序发出的业务场景。我们仍然可以并行运行`transform`函数。我们所要做的就是对每个任务发出的数据进行排序，使其遵循与接收数据相同的顺序。
+
+这种技术涉及使用`buffer`，在每个正在运行的任务发出时重新排序块。为简洁起见，我们不打算提供这样一个`stream`的实现，因为这本书的范围是相当冗长的；我们要做的就是重用为了这个特定目的而构建的`npm`上的一个可用包，例如[through2-parallel](https://npmjs.org/package/through2-parallel)。
+
+我们可以通过修改现有的`checkUrls`模块来快速检查一个有序的并行执行的行为。 假设我们希望我们的结果按照与输入文件中的`URL`相同的顺序编写。 我们可以使用通过`through2-parallel`来实现：
+
+```javascript
+const fs = require('fs');
+const split = require('split');
+const request = require('request');
+const throughParallel = require('through2-parallel');
+
+fs.createReadStream(process.argv[2])
+  .pipe(split())
+  .pipe(throughParallel.obj({concurrency: 2}, function (url, enc, done) {
+    if(!url) return done();
+    request.head(url, (err, response) => {
+      this.push(url + ' is ' + (err ? 'down' : 'up') + '\n');
+      done();
+    });
+  }))
+  .pipe(fs.createWriteStream('results.txt'))
+  .on('finish', () => console.log('All urls were checked'))
+;
+```
+
+正如我们所看到的，`through2-parallel`的接口与`through2`的接口非常相似；唯一的不同是在`through2-parallel`还可以为我们提供的`transform`函数指定一个并发限制。如果我们尝试运行这个新版本的`checkUrls`，我们会看到`results.txt`文件列出结果的顺序与输入文件中
+URLs的出现顺序是一样的。
+
+通过这个，我们总结了使用`Streams`实现异步控制流的分析；接下来，我们研究管道模式。
+
+### 管道模式
+就像在现实生活中一样，`Node.js`的`Streams`也可以按照不同的模式进行管道连接。事实上，我们可以将两个不同的`Streams`合并成一个`Streams`，将一个`Streams`分成两个或更多的管道，或者根据条件重定向流。 在本节中，我们将探讨可应用于`Node.js`的`Streams`最重要的管道技术。
+
+#### 组合的Streams
+在本章中，我们强调`Streams`提供了一个简单的基础结构来模块化和重用我们的代码，但是却漏掉了一个重要的部分：如果我们想要模块化和重用整个流水线？如果我们想要合并多个`Streams`，使它们看起来像外部的`Streams`，那该怎么办？下图显示了这是什么意思：
+
+![](http://oczira72b.bkt.clouddn.com/17-12-9/23434927.jpg)
+
+从上图中，我们看到了如何组合几个流的了：
+
+* 当我们写入组合的`Streams`的时候，实际上我们是写入组合的`Streams`的第一个单元，即`StreamA`。
+* 当我们从组合的`Streams`中读取信息时，实际上我们从组合的`Streams`的最后一个单元中读取。
+
+一个组合的`Streams`通常是一个多重的`Streams`，通过连接第一个单元的写入端和连接最后一个单元的读取端。
+
+> 要从两个不同的Streams（一个可读的Streams和一个可写入的Streams）中创建一个多重的Streams，我们可以使用一个npm模块，例如[duplexer2](https://npmjs.org/package/duplexer2)。
+
