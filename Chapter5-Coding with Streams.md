@@ -1024,3 +1024,404 @@ URLs的出现顺序是一样的。
 
 > 要从两个不同的Streams（一个可读的Streams和一个可写入的Streams）中创建一个多重的Streams，我们可以使用一个npm模块，例如[duplexer2](https://npmjs.org/package/duplexer2)。
 
+但上述这么做并不完整。实际上，组合的`Streams`还应该做到捕获到管道中任意一段`Streams`单元产生的错误。我们已经说过，任何错误都不会自动传播到管道中。 所以，我们必须有适当的错误管理，我们将不得不显式附加一个错误监听器到每个`Streams`。但是，组合的`Streams`实际上是一个黑盒，这意味着我们无法访问管道中间的任何单元，所以对于管道中任意单元的异常捕获，组合的`Streams`也充当聚合器的角色。
+
+总而言之，组合的`Streams`具有两个主要优点：
+
+* 管道内部是一个黑盒，对使用者不可见。
+* 简化了错误管理，因为我们不必为管道中的每个单元附加一个错误侦听器，而只需要给组合的`Streams`自身附加上就可以了。
+
+组合的`Streams`是一个非常通用和普遍的做法，所以如果我们没有任何特殊的需要，我们可能只想重用现有的解决方案，如[multipipe](https://www.npmjs.org/package/multipipe)或[combine-stream](https://www.npmjs.org/package/combine-stream)。
+
+#### 实现一个组合的Streams
+为了说明一个简单的例子，我们来考虑下面两个组合的`Streams`的情况：
+
+* 压缩和加密数据
+* 解压和解密数据
+
+使用诸如`multipipe`之类的库，我们可以通过组合一些核心库中已有的`Streams`（文件`combinedStreams.js`）来轻松地构建组合的`Streams`：
+
+```javascript
+const zlib = require('zlib');
+const crypto = require('crypto');
+const combine = require('multipipe');
+module.exports.compressAndEncrypt = password => {
+  return combine(
+    zlib.createGzip(),
+    crypto.createCipher('aes192', password)
+  );
+};
+module.exports.decryptAndDecompress = password => {
+  return combine(
+    crypto.createDecipher('aes192', password),
+    zlib.createGunzip()
+  );
+};
+```
+
+例如，我们现在可以使用这些组合的数据流，如同黑盒，这些对我们均是不可见的，可以创建一个小型应用程序，通过压缩和加密来归档文件。 让我们在一个名为`archive.js`的新模块中做这件事： 
+
+```javascript
+const fs = require('fs');
+const compressAndEncryptStream = require('./combinedStreams').compressAndEncrypt;
+fs.createReadStream(process.argv[3])
+  .pipe(compressAndEncryptStream(process.argv[2]))
+  .pipe(fs.createWriteStream(process.argv[3] + ".gz.enc"));
+```
+
+我们可以通过从我们创建的流水线中构建一个组合的`Stream`来进一步改进前面的代码，但这次并不只是为了获得对外不可见的黑盒，而是为了进行异常捕获。 实际上，正如我们已经提到过的那样，写下如下的代码只会捕获最后一个`Stream`单元发出的错误：
+
+```javascript
+fs.createReadStream(process.argv[3])
+  .pipe(compressAndEncryptStream(process.argv[2]))
+  .pipe(fs.createWriteStream(process.argv[3] + ".gz.enc"))
+  .on('error', function(err) {
+    // 只会捕获最后一个单元的错误
+    console.log(err);
+  });
+```
+
+但是，通过把所有的`Streams`结合在一起，我们可以优雅地解决这个问题。重构后的`archive.js`如下： 
+
+```javascript
+const combine = require('multipipe');
+   const fs = require('fs');
+   const compressAndEncryptStream =
+     require('./combinedStreams').compressAndEncrypt;
+   combine(
+     fs.createReadStream(process.argv[3])
+     .pipe(compressAndEncryptStream(process.argv[2]))
+     .pipe(fs.createWriteStream(process.argv[3] + ".gz.enc"))
+   ).on('error', err => {
+     // 使用组合的Stream可以捕获任意位置的错误
+     console.log(err);
+   });
+```
+
+正如我们所看到的，我们现在可以将一个错误侦听器直接附加到组合的`Streams`，它将接收任何内部流发出的任何`error`事件。
+现在，要运行`archive`模块，只需在命令行参数中指定`password`和`file`参数，即压缩模块的参数：
+
+```bash
+node archive mypassword /path/to/a/file.text
+```
+
+通过这个例子，我们已经清楚地证明了组合的`Stream`是多么重要; 从一个方面来说，它允许我们创建流的可重用组合，从另一方面来说，它简化了管道的错误管理。
+
+### 分开的`Streams`
+我们可以通过将单个可读的`Stream`管道化为多个可写入的`Stream`来执行`Stream`的分支。当我们想要将相同的数据发送到不同的目的地时，这便体现其作用了，例如，两个不同的套接字或两个不同的文件。当我们想要对相同的数据执行不同的转换时，或者当我们想要根据一些标准拆分数据时，也可以使用它。如图所示：
+
+![](http://oczira72b.bkt.clouddn.com/17-12-31/44841803.jpg)
+
+在`Node.js`中分开的`Stream`是一件小事。举例说明。
+
+#### 实现一个多重校验和的生成器
+让我们创建一个输出给定文件的`sha1`和`md5`散列的小工具。我们来调用这个新模块`generateHashes.js`，看如下的代码：
+
+```javascript
+const fs = require('fs');
+const crypto = require('crypto');
+const sha1Stream = crypto.createHash('sha1');
+sha1Stream.setEncoding('base64');
+const md5Stream = crypto.createHash('md5');
+md5Stream.setEncoding('base64');
+```
+
+目前为止没什么特别的 该模块的下一个部分实际上是我们将从文件创建一个可读的`Stream`，并将其分叉到两个不同的流，以获得另外两个文件，其中一个包含`sha1`散列，另一个包含`md5`校验和：
+
+```javascript
+const inputFile = process.argv[2];
+const inputStream = fs.createReadStream(inputFile);
+inputStream
+  .pipe(sha1Stream)
+  .pipe(fs.createWriteStream(inputFile + '.sha1'));
+inputStream
+  .pipe(md5Stream)
+  .pipe(fs.createWriteStream(inputFile + '.md5'));
+```
+
+这很简单：`inputStream`变量通过管道一边输入到`sha1Stream`，另一边输入到`md5Stream`。但是要注意：
+
+* 当`inputStream`结束时，`md5Stream`和`sha1Stream`会自动结束，除非当调用`pipe()`时指定了`end`选项为`false`。
+
+* `Stream`的两个分支会接受相同的数据块，因此当对数据执行一些副作用的操作时我们必须非常谨慎，因为那样会影响另外一个分支。
+
+* 黑盒外会产生背压，来自`inputStream`的数据流的流速会根据接收最慢的分支的流速作出调整。
+
+### 合并的`Streams`
+合并与分开相对，通过把一组可读的`Streams`合并到一个单独的可写的`Stream`里，如图所示：
+
+![](http://oczira72b.bkt.clouddn.com/17-12-31/93682580.jpg)
+
+将多个`Streams`合并为一个通常是一个简单的操作; 然而，我们必须注意我们处理`end`事件的方式，因为使用自动结束选项的管道系统会在一个源结束时立即结束目标流。 这通常会导致错误，因为其他还未结束的源将继续写入已终止的`Stream`。 解决此问题的方法是在将多个源传输到单个目标时使用选项`{end：false}`，并且只有在所有源完成读取后才在目标`Stream`上调用`end()`。
+
+#### 用多个源文件压缩为一个压缩包
+举一个简单的例子，我们来实现一个小程序，它根据两个不同目录的内容创建一个压缩包。 为此，我们将介绍两个新的`npm`模块：
+
+* [tar](https://www.npmjs.com/package/tar)用来创建压缩包
+* [fstream](https://www.npmjs.com/package/fstream)从文件系统文件创建对象streams的库
+
+我们创建一个新模块`mergeTar.js`，如下开始初始化：
+
+```javascript
+var tar = require('tar');
+var fstream = require('fstream');
+var path = require('path');
+var destination = path.resolve(process.argv[2]);
+var sourceA = path.resolve(process.argv[3]);
+var sourceB = path.resolve(process.argv[4]);
+```
+
+在前面的代码中，我们只加载全部依赖包和初始化包含目标文件和两个源目录(`sourceA`和`sourceB`)的变量。
+
+接下来，我们创建`tar`的`Stream`并通过管道输出到一个可写入的`Stream`：
+
+```javascript
+const pack = tar.Pack();
+pack.pipe(fstream.Writer(destination));
+```
+
+现在，我们开始初始化源`Stream`
+
+```javascript
+let endCount = 0;
+
+function onEnd() {
+  if (++endCount === 2) {
+    pack.end();
+  }
+}
+
+const sourceStreamA = fstream.Reader({
+    type: "Directory",
+    path: sourceA
+  })
+  .on('end', onEnd);
+
+const sourceStreamB = fstream.Reader({
+    type: "Directory",
+    path: sourceB
+  })
+  .on('end', onEnd);
+```
+
+在前面的代码中，我们创建了从两个源目录（`sourceStreamA`和`sourceStreamB`）中读取的`Stream`那么对于每个源`Stream`，我们附加一个`end`事件订阅者，只有当这两个目录被完全读取时，才会触发`pack`的`end`事件。
+
+最后，合并两个`Stream`：
+
+```javascript
+sourceStreamA.pipe(pack, {end: false});
+sourceStreamB.pipe(pack, {end: false});
+```
+
+我们将两个源文件都压缩到`pack`这个`Stream`中，并通过设定`pipe()`的`option`参数为`{end：false}`配置终点`Stream`的自动触发`end`事件。
+
+这样，我们已经完成了我们简单的`TAR`程序。我们可以通过提供目标文件作为第一个命令行参数，然后是两个源目录来尝试运行这个实用程序：
+
+```javascript
+node mergeTar dest.tar /path/to/sourceA /path/to/sourceB
+```
+
+在`npm`中我们可以找到一些可以简化`Stream`的合并的模块：
+
+* [merge-stream](https://www.npmjs.com/package/merge-stream)
+* [multistream-merge](https://www.npmjs.com/package/multistream-merge)
+
+要注意，流入目标`Stream`的数据是随机混合的，这是一个在某些类型的对象流中可以接受的属性（正如我们在上一个例子中看到的那样），但是在处理二进制`Stream`时通常是一个不希望这样。
+
+然而，我们可以通过一种模式按顺序合并`Stream`; 它包含一个接一个地合并源`Stream`，当前一个结束时，开始发送第二段数据块（就像连接所有源`Stream`的输出一样）。在`npm`上，我们可以找到一些也处理这种情况的软件包。其中之一是[multistream](https://npmjs.org/package/multistream)。
+
+### 多路复用和多路分解
+合并`Stream`模式有一个特殊的模式，我们并不是真的只想将多个`Stream`合并在一起，而是使用一个共享通道来传送一组数据`Stream`。与之前的不一样，因为源数据`Stream`在共享通道内保持逻辑分离，这使得一旦数据到达共享通道的另一端，我们就可以再次分离数据`Stream`。如图所示：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-1/35586096.jpg)
+
+将多个`Stream`组合在单个`Stream`上传输的操作被称为多路复用，而相反的操作（即，从共享`Stream`接收数据重构原始的`Stream`）则被称为多路分用。执行这些操作的设备分别称为多路复用器和多路分解器（。 这是一个在计算机科学和电信领域广泛研究的话题，因为它是几乎任何类型的通信媒体，如电话，广播，电视，当然还有互联网本身的基础之一。 对于本书的范围，我们不会过多解释，因为这是一个很大的话题。
+
+我们想在本节中演示的是，如何使用共享的`Node.js Streams`来传送多个逻辑上分离的`Stream`，然后在共享`Stream`的另一端再次分离，即实现一次多路复用和多路分解。
+
+#### 创建一个远程logger日志记录
+举例说明，我们希望有一个小程序来启动子进程，并将其标准输出和标准错误都重定向到远程服务器，服务器接受它们然后保存为两个单独的文件。因此，在这种情况下，共享介质是`TCP`连接，而要复用的两个通道是子进程的`stdout`和`stderr`。 我们将利用分组交换的技术，这种技术与`IP`，`TCP`或`UDP`等协议所使用的技术相同，包括将数据封装在数据包中，允许我们指定各种源信息，这对多路复用，路由，控制 流程，检查损坏的数据都十分有帮助。
+
+如图所示，这个例子的协议大概是这样，数据被封装成具有以下结构的数据包：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-1/44372113.jpg)
+
+##### 在客户端实现多路复用
+先说客户端，创建一个名为`client.js`的模块，这是我们这个应用程序的一部分，它负责启动一个子进程并实现`Stream`多路复用。
+
+开始定义模块，首先加载依赖：
+
+```javascript
+const child_process = require('child_process');
+const net = require('net');
+```
+
+然后开始实现多路复用的函数：
+
+```javascript
+function multiplexChannels(sources, destination) {
+  let totalChannels = sources.length;
+
+  for(let i = 0; i < sources.length; i++) {
+    sources[i]
+      .on('readable', function() { // [1]
+        let chunk;
+        while ((chunk = this.read()) !== null) {
+          const outBuff = new Buffer(1 + 4 + chunk.length); // [2]
+          outBuff.writeUInt8(i, 0);
+          outBuff.writeUInt32BE(chunk.length, 1);
+          chunk.copy(outBuff, 5);
+          console.log('Sending packet to channel: ' + i);
+          destination.write(outBuff); // [3]
+        }
+      })
+      .on('end', () => { //[4]
+        if (--totalChannels === 0) {
+          destination.end();
+        }
+      });
+  }
+}
+```
+
+`multiplexChannels()`函数接受要复用的源`Stream`作为输入
+和复用接口作为参数，然后执行以下步骤：
+
+1. 对于每个源`Stream`，它会注册一个`readable`事件侦听器，我们使用`non-flowing`模式从流中读取数据。
+
+2. 每读取一个数据块，我们将其封装到一个首部中，首部的顺序为：`channel ID`为1字节（`UInt8`），数据包大小为4字节（`UInt32BE`），然后为实际数据。
+
+3. 数据包准备好后，我们将其写入目标`Stream`。
+
+4. 我们为`end`事件注册一个监听器，以便当所有源`Stream`结束时，`end`事件触发，通知目标`Stream`触发`end`事件。
+
+> 注意，我们的协议最多能够复用多达256个不同的源流，因为我们只有1个字节来标识`channel`。
+
+```javascript
+const socket = net.connect(3000, () => { // [1]
+  const child = child_process.fork( // [2]
+    process.argv[2],
+    process.argv.slice(3), {
+      silent: true
+    }
+  );
+  multiplexChannels([child.stdout, child.stderr], socket); // [3]
+});
+```
+
+在最后，我们执行以下操作：
+
+1. 我们创建一个新的`TCP`客户端连接到地址`localhost:3000`。
+2. 我们通过使用第一个命令行参数作为路径来启动子进程，同时我们提供剩余的`process.argv`数组作为子进程的参数。我们指定选项`{silent：true}`，以便子进程不会继承父级的`stdout`和`stderr`。
+3. 我们使用`mutiplexChannels()`函数将`stdout`和`stderr`多路复用到`socket`里。
+
+##### 在服务端实现多路分解
+现在来看服务端，创建`server.js`模块，在这里我们将来自远程连接的`Stream`多路分解，并将它们传送到两个不同的文件中。
+
+首先创建一个名为`demultiplexChannel()`的函数：
+
+```javascript
+function demultiplexChannel(source, destinations) {
+  let currentChannel = null;
+  let currentLength = null;
+  source
+    .on('readable', () => { //[1]
+      let chunk;
+      if(currentChannel === null) {          //[2]
+        chunk = source.read(1);
+        currentChannel = chunk && chunk.readUInt8(0);
+      }
+    
+      if(currentLength === null) {          //[3]
+        chunk = source.read(4);
+        currentLength = chunk && chunk.readUInt32BE(0);
+        if(currentLength === null) {
+          return;
+        }
+      }
+    
+      chunk = source.read(currentLength);        //[4]
+      if(chunk === null) {
+        return;
+      }
+    
+      console.log('Received packet from: ' + currentChannel);
+    
+      destinations[currentChannel].write(chunk);      //[5]
+      currentChannel = null;
+      currentLength = null;
+    })
+    .on('end', () => {            //[6]
+      destinations.forEach(destination => destination.end());
+      console.log('Source channel closed');
+    })
+  ;
+}
+```
+
+上面的代码可能看起来很复杂，仔细阅读并非如此；由于`Node.js`可读的`Stream`的拉动特性，我们可以很容易地实现我们的小协议的多路分解，如下所示：
+1. 我们开始使用`non-flowing`模式从流中读取数据。
+2. 首先，如果我们还没有读取`channel ID`，我们尝试从流中读取1个字节，然后将其转换为数字。
+3. 下一步是读取首部的长度。我们需要读取4个字节，所以有可能在内部`Buffer`还没有足够的数据，这将导致`this.read()`调用返回`null`。在这种情况下，我们只是中断解析，然后重试下一个`readable`事件。
+4. 当我们最终还可以读取数据大小时，我们知道从内部`Buffer`中拉出多少数据，所以我们尝试读取所有数据。
+5. 当我们读取所有的数据时，我们可以把它写到正确的目标通道，一定要记得重置`currentChannel`和`currentLength`变量（这些变量将被用来解析下一个数据包）。
+6. 最后，当源`channel`结束时，一定不要忘记调用目标`Stream`的`end()`方法。
+
+既然我们可以多路分解源`Stream`，进行如下调用：
+
+```javascript
+net.createServer(socket => {
+  const stdoutStream = fs.createWriteStream('stdout.log');
+  const stderrStream = fs.createWriteStream('stderr.log');
+  demultiplexChannel(socket, [stdoutStream, stderrStream]);
+})
+  .listen(3000, () => console.log('Server started'))
+;
+```
+
+在上面的代码中，我们首先在`3000`端口上启动一个`TCP`服务器，然后对于我们接收到的每个连接，我们将创建两个可写入的`Stream`，指向两个不同的文件，一个用于标准输出，另一个用于标准错误; 这些是我们的目标`channel`。 最后，我们使用`demultiplexChannel()`将套接字流解复用为`stdoutStream`和`stderrStream`。
+
+##### 运行多路复用和多路分解应用程序
+现在，我们准备尝试运行我们的新的多路复用/多路分解应用程序，但首先让我们创建一个小的`Node.js`程序来产生一些示例输出; 我们把它叫做`generateData.js`：
+
+```javascript
+console.log("out1");
+console.log("out2");
+console.error("err1");
+console.log("out3");
+console.error("err2");
+```
+
+首先，让我们开始运行服务端：
+
+```bash
+node server
+```
+
+然后运行客户端，需要提供作为子进程的文件参数：
+
+```bash
+node client generateData.js
+```
+
+![](http://oczira72b.bkt.clouddn.com/18-1-1/50338550.jpg)
+
+客户端几乎立马运行，但是进程结束时，`generateData`应用程序的标准输入和标准输出经过一个`TCP`连接，然后在服务器端，被多路分解成两个文件。
+
+> 注意，当我们使用`child_process.fork()`时，我们的客户端能够启动别的`Node.js`模块。
+
+#### 对象Streams的多路复用和多路分解
+我们刚刚展示的例子演示了如何复用和解复用二进制/文本`Stream`，但值得一提的是，相同的规则也适用于对象`Stream`。 最大的区别是，使用对象，我们已经有了使用原子消息（对象）传输数据的方法，所以多路复用就像设置一个属性`channel ID`到每个对象一样简单，而多路分解只需要读`·channel ID`属性，并将每个对象路由到正确的目标`Stream`。
+
+还有一种模式是取一个对象上的几个属性并分发到多个目的`Stream`的模式 通过这种模式，我们可以实现复杂的流程，如下图所示：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-1/38782926.jpg)
+
+如上图所示，取一个对象`Stream`表示`animals`，然后根据动物类型：`reptiles`，`amphibians`和`mammals`，然后分发到正确的目标`Stream`中。
+
+## 总结
+在本章中，我们已经对`Node.js Streams`及其使用案例进行了阐述，但同时也应该为编程范式打开一扇大门，几乎具有无限的可能性。我们了解了为什么`Stream`被`Node.js`社区赞誉，并且我们掌握了它们的基本功能，使我们能够利用它做更多有趣的事情。我们分析了一些先进的模式，并开始了解如何将不同配置的`Streams`连接在一起，掌握这些特性，从而使流如此多才多艺，功能强大。
+
+如果我们遇到不能用一个`Stream`来实现的功能，我们可以通过将其他`Streams`连接在一起来实现，这是`Node.js`的一个很好的特性；`Streams`在处理二进制数据，字符串和对象都十分有用，并具有鲜明的特点。
+
+在下一章中，我们将重点介绍传统的面向对象的设计模式。尽管`JavaScript`在某种程度上是面向对象的语言，但在`Node.js`中，函数式或混合方法通常是首选。在阅读下一章便揭晓答案。
