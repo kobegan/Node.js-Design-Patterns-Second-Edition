@@ -16,6 +16,7 @@
 * [第三章：基于回调的异步控制流](./Chapter3-Asynchronous%20Control%20Flow%20Patterns%20with%20Callbacks.md)
 * [第四章：基于ES2015+的异步控制流](./Chapter4-Asynchronous%20Control%20Flow%20Patterns%20with%20ES2015%20and%20Beyond.md)
 * [第五章：使用流进行编码](./Chapter5-Coding%20with%20Streams.md)
+* [第九章：高级异步准则](./Chapter9-Advanced%20Asynchronous%20Recipes.md)
 
 > 之后的内容正在阅读中，敬请期待……
 
@@ -24,7 +25,7 @@
 
 ```javascript
 (function(isHelpful) {
-  if (isHelfful) {
+  if (isHelpful) {
     // Spicy dry tofu
     feedToEncounter();
   } else {
