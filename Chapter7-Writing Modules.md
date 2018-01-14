@@ -587,3 +587,361 @@ module.exports = () => {
   return serviceLocator;
 };
 ```
+
+我们的`serviceLocator`模块是一个用三种方法返回对象的工厂函数：
+
+* `factory()`方法用于将组件名称与工厂函数关联。
+* `register()`用于将组件名称直接与实例相关联。
+* `get()`通过名称检索组件。如果一个实例已经可用，它只是返回它；否则，它会尝试调用注册的工厂来获取新的实例。注意到模块工厂是通过注入服务定位器（`serviceLocator`）的当前实例来调用是非常重要的。这是模式的核心机制，允许自动和按需建立系统依赖关系图。接下来看它是如何工作的。
+
+> 服务定位器使用一个对象作为一组依赖项的命名空间：
+
+```javascript
+const dependencies = {};
+const db = require('./lib/db');
+const authService = require('./lib/authService');
+dependencies.db = db();
+dependencies.authService = authService(dependencies);
+```
+
+更改`lib/db.js`模块来`serviceLocator`的工作：
+
+```javascript
+"use strict";
+
+const level = require('level');
+const sublevel = require('level-sublevel');
+
+module.exports = (serviceLocator) => {
+  const dbName = serviceLocator.get('dbName');
+
+  return sublevel(
+    level(dbName, {valueEncoding: 'json'})
+  );
+};
+```
+
+`db`模块使用输入中接收到的服务定位器来检索要实例化的数据库的名称。需要强调的是，服务定位器不仅可用于返回组件实例，还可用于提供定义我们要创建的整个依赖关系图的行为的配置参数。
+
+接下来更改`lib/authService.js`模块：
+
+```javascript
+"use strict";
+
+const jwt = require('jwt-simple');
+const bcrypt = require('bcrypt');
+
+module.exports = (serviceLocator) => {
+  const db = serviceLocator.get('db');
+  const tokenSecret = serviceLocator.get('tokenSecret');
+  
+  const users = db.sublevel('users');
+  const authService = {};
+  
+  authService.login = (username, password, callback) => {
+    users.get(username, (err, user) => {
+      if (err) return callback(err);
+      
+      bcrypt.compare(password, user.hash, (err, res) => {
+        if (err) return callback(err);
+        if (!res) return callback(new Error('Invalid password'));
+        
+        const token = jwt.encode({
+          username: username,
+          expire: Date.now() + (1000 * 60 * 60) //1 hour
+        }, tokenSecret);
+        
+        callback(null, token);
+      });
+    });
+  };
+
+  authService.checkToken = (token, callback) => {
+    let userData;
+    try {
+      //jwt.decode will throw if the token is invalid
+      userData = jwt.decode(token, tokenSecret);
+      if(userData.expire <= Date.now()) {
+        throw new Error('Token expired');
+      }
+    } catch(err) {
+      return process.nextTick(callback.bind(null, err));
+    }
+      
+    users.get(userData.username, (err, user) => {
+      if (err) return callback(err);
+      callback(null, {username: userData.username});
+    });
+  };
+  
+  return authService;
+};
+```
+
+`authService`模块将服务定位器作为输入的工厂。使用服务定位器的`get()`方法检索模块的两个依赖关系，即`db`对象和`tokenSecret`（这是另一个配置参数）。
+
+以类似的方式，我们可以转换`lib/authController.js`模块：
+
+```javascript
+"use strict";
+
+module.exports = (serviceLocator) => {
+  const authService = serviceLocator.get('authService');
+  const authController = {};
+  
+  authController.login = (req, res, next) => {
+    authService.login(req.body.username, req.body.password,
+      (err, result) => {
+        if (err) {
+          return res.status(401).send({
+            ok: false,
+            error: 'Invalid username/password'
+          });
+        }
+        res.status(200).send({ok: true, token: result});
+      }
+    );
+  };
+
+  authController.checkToken = (req, res, next) => {
+    authService.checkToken(req.query.token,
+      (err, result) => {
+        if (err) {
+          return res.status(401).send({
+            ok: false,
+            error: 'Token is invalid or expired'  
+          });
+        }
+        res.status(200).send({ok: 'true', user: result});
+      }
+    );
+  };
+  
+  return authController;
+};
+```
+
+现在来看如何实例化和配置服务定位器。当然，这发生在`app.js`模块中：
+
+```javascript
+"use strict";
+
+const Express = require('express');
+const bodyParser = require('body-parser');
+const errorHandler = require('errorhandler');
+const http = require('http');
+
+const app = module.exports = new Express();
+app.use(bodyParser.json());
+
+const svcLoc = require('./lib/serviceLocator')();
+
+svcLoc.register('dbName', 'example-db');
+svcLoc.register('tokenSecret', 'SHHH!');
+svcLoc.factory('db', require('./lib/db'));
+svcLoc.factory('authService', require('./lib/authService'));
+svcLoc.factory('authController', require('./lib/authController'));
+
+const authController = svcLoc.get('authController');
+
+app.post('/login', authController.login);
+app.get('/checkToken', authController.checkToken);
+
+app.use(errorHandler());
+http.createServer(app).listen(3000, () => {
+  console.log('Express server started');
+});
+```
+
+这就是新的服务定位器的连接方式：
+
+1. 我们通过调用工厂实例化一个新的服务定位器。
+2. 针对服务定位器注册配置参数和模块工厂。在这一点上，我们所有的依赖关系还没有实例化。我们只是注册他们的工厂。
+3. 我们从服务定位器加载`authController`；这是在我们的应用程序的整个依赖关系图的实例化的入口点。当我们询问`authController`组件的实例时，服务定位器通过注入自己的一个实例来调用关联的工厂，然后`authController`工厂将尝试加载`authService`模块，然后实例化`db`模块。
+
+服务定位器惰性加载模块。每个实例仅在需要时创建。还有另一个重要的含义：事实上，我们可以看到，每个依赖关系都是自动连接的，无需事先手动完成。好处是我们不必事先知道实例化和连接模块的正确顺序是什么 - 这一切都是自动和按需进行的。与简单的依赖注入模式相比，这更方便。
+
+> 另一种常见模式是使用`Express`服务器实例作为简单的服务定位器。这可以通过使用`expressApp.set(name，instance)`来注册一个服务和`expressApp.get(name)`来获得。这种模式的一个很方便的地方就是作为服务定位器的服务器实例已经被注入到每个中间件中，并且可以通过`request.app`属性来访问。可以在随处找到这个模式的例子。
+
+#### 服务定位器的优点和缺点
+服务定位器和依赖注入具有很多共同点：都将依赖关系所有权转移到组件外部的实体。但是连接服务定位器的方式决定这个模式的灵活性。我们选择一个注入的服务定位器来实现我们的例子，而不是硬性的或全局的服务定位器，这几乎就是这种模式优势所在。实际上，结果将会是，我们不是使用`require()`将组件直接耦合到它的依赖项，而是将它耦合到服务定位器的一个特定实例。硬编码的服务定位器在配置与特定名称关联的组件时仍然具有更大的灵活性，但是在复用性方面仍然没有什么大的优势。
+
+此外，与`DI`一样，使用服务定位器使得在运行时解决组件之间的关系变得更加困难。另外，这也使得我们更难准确知道特定组件的互相依赖。使用`DI`，可以用更清晰的方式表示：通过在工厂或构造函数参数中声明依赖关系。有了服务定位器，这个问题就不那么清楚了，需要在文档中进行代码检查或显式声明，以解释特定组件将要加载的依赖关系。
+
+最后要知道，一个服务定位器经常被错误地认为是一个`DI`容器，因为它与依赖注入中心扮演相同的角色；然而，这两者之间有很大的差别。使用服务定位器，每个组件都明确地从服务定位器本身加载它的依赖关系。当使用DI容器时，组件与容器互不所知。
+
+这两种方法之间的区别是显而易见的，原因有两个：
+
+* 可重用性：依赖于服务定位器的组件不易重用，因为它要求系统中有一个服务定位器
+* 可读性：正如我们已经说过的，服务定位器混淆了组件的依赖性要求
+
+就可重用性而言，我们可以说服务定位器模式位于硬编码依赖关系和`DI`之间。在方便和简单方面，它肯定比手动`DI`更好，因为我们不必手动关心构建整个依赖关系图。
+
+在这些假设下，`DI`容器在组件的可重用性和便利性方面有更大的优势。我们将在下一节中更好地分析这种模式。
+
+### 依赖注入容器
+将服务定位器转换为依赖注入（`DI`）容器的步骤并不复杂，但正如我们已经提到的，它在解耦方面优势很大。事实上，每个模块都不需要依赖服务定位器，只需在依赖关系上表达需求，`DI`容器就可以无缝地完成其他任务。正如我们将看到的，这个机制的优势在于，即使没有容器，每个模块都可以被重用。
+
+#### 向依赖注入容器声明一组依赖关系
+依赖注入容器本质上是一个服务定位器，增加了一个功能：它在实例化之前标识模块的依赖性需求。为了做到这一点，一个模块必须以某种方式声明它的依赖关系，正如我们将看到的，我们有多种选择声明依赖关系。
+
+第一种，也许是最流行的技术，是基于工厂或构造函数中使用的参数名称注入一组依赖关系。以`authService`模块为例：
+
+```javascript
+module.exports = (db, tokenSecret) => {
+  //...
+}
+```
+
+正如我们所定义的，前面的模块将由我们的依赖注入容器使用名称为`db`和`tokenSecret`的依赖关系来实例化，这是一个非常简单直观的机制。 但是，为了能够读取函数参数的名称，有必要使用一些小技巧。 在`JavaScript`中，我们有可能序列化一个函数，在运行时获取它的源代码; 这与在函数引用上调用`toString()`一样简单。用正则表达式，获取参数列表当然不是黑魔法。
+
+> [AngularJS](http://angularjs.org)是一个由`Google`开发的客户端`JavaScript`框架，它完全建立在DI容器之上，这种使用函数参数名称注入一组依赖关系的技术被广泛使用。
+
+这种方法最大的问题是，源代码过长，这是一种在客户端`JavaScript`中广泛使用的做法，其中包括应用特定的代码转换以减小源代码的大小。有一种变量名称变更的技术，该技术基本上重命名任何局部变量以减少其长度，通常是单个字符。坏消息是函数参数是局部变量，通常会受到这个过程的影响，导致我们描述的声明依赖关系崩溃的机制。尽管在服务器端代码中缩小并不是非常必要，但重要的是要考虑到`Node.js`模块经常与浏览器共享，这是我们分析中需要考虑的一个重要因素。
+
+幸运的是，依赖注入容器可能使用其他技术来知道要注入哪些依赖关系。这些技术如下：
+
+* 我们可以使用附加到工厂函数的特殊属性，例如，显式列出要注入的所有依赖项的数组：
+
+```javascript
+module.exports = (a, b) => {};
+module.exports._inject = ['db', 'another/dependency'];
+```
+
+* 我们可以指定一个模块作为依赖项名称的数组，然后是工厂函数：
+
+```javascript
+module.exports = ['db', 'another/depencency',(a, b) => {}];
+```
+
+* 我们可以使用附加到函数的每个参数的注释注释（但是，对于缩小源代码的体积，这也不能很好地发挥作用）：
+
+```javascript
+module.exports = function(a /*db*/, b /*another/depencency*/) {};
+```
+
+所有这些技术都各有优势，因此对于我们的例子，我们将使用最简单和流行的方法，即使用函数的参数来获得依赖项名称。
+
+#### 使用DI容器重构鉴权服务器
+为了演示`DI`容器如何比服务定位器的耦合性更低，我们现在要再次重构我们的认证服务器，为此我们将使用我们使用纯`DI`模式的版本作为起点。实际上，我们要做的只是保留`app.js`模块的所有组件，除了`app.js`模块，它将是负责初始化容器的模块。
+
+但首先，我们需要实施我们的`DI`容器。 让我们通过在`lib/`目录下创建一个名为`diContainer.js`的新模块来实现这一点。这是它的最初部分：
+
+```javascript
+"use strict";
+
+const fnArgs = require('parse-fn-args');
+
+module.exports = () => {
+  const dependencies = {};
+  const factories = {};
+  const diContainer = {};
+  
+  diContainer.factory = (name, factory) => {
+    factories[name] = factory;
+  };
+  
+  diContainer.register = (name, dep) => {
+    dependencies[name] = dep;
+  };
+  
+  diContainer.get = (name) => {
+    if (!dependencies[name]) {
+      const factory = factories[name];
+      dependencies[name] = factory && 
+          diContainer.inject(factory);
+      if (!dependencies[name]) {
+        throw new Error('Cannot find module: ' + name);
+      }
+    }
+    return dependencies[name];
+  };
+  
+  diContainer.inject = (factory) => {
+    const args = fnArgs(factory)
+      .map(function(dependency) {
+        return diContainer.get(dependency);
+      });
+    return factory.apply(null, args);
+  };
+  
+  return diContainer;
+};
+```
+
+`diContainer`模块的第一部分在功能上与我们的服务定位器完全相同
+以前见过。 唯一显着的区别是：
+
+* 我们需要一个名为[args-list](https://npmjs.org/package/args-list)的新的`npm`模块，我们将使用它来提取函数参数的名称
+* 这一次，我们不是直接调用模块工厂，而是依赖另一个名为`inject()`的`diContainer`模块的方法，它将解析模块的依赖关系并使用它来调用工厂。
+
+`inject()`是使DI容器与服务定位器不同的原因。其逻辑非常简单：
+
+1. 我们使用`parse-fn-args`库从我们接收的工厂函数中提取参数列表作为输入。
+2. 然后，我们将每个参数名称映射到使用`get()`方法检索到的相应的依赖项实例。
+3. 最后，我们所要做的只是通过提供我们刚刚生成的依赖列表来调用工厂。
+我们的`diContainer`就是这样，正如我们所看到的，它与服务定位器没有多大的区别，但是通过注入依赖来实例化模块的简单步骤与注入整个服务定位器相比有着巨大的差异。
+
+为了完成认证服务器的重构，我们还需要调整`app.js`模块：
+
+```javascript
+"use strict";
+
+const Express = require('express');
+const bodyParser = require('body-parser');
+const errorHandler = require('errorhandler');
+const http = require('http');
+
+const app = module.exports = new Express();
+app.use(bodyParser.json());
+
+const diContainer = require('./lib/diContainer')();
+
+diContainer.register('dbName', 'example-db');
+diContainer.register('tokenSecret', 'SHHH!');
+diContainer.factory('db', require('./lib/db'));
+diContainer.factory('authService', require('./lib/authService'));
+diContainer.factory('authController', require('./lib/authController'));
+
+const authController = diContainer.get('authController');
+
+app.post('/login', authController.login);
+app.get('/checkToken', authController.checkToken);
+
+app.use(errorHandler());
+http.createServer(app).listen(3000, () => {
+  console.log('Express server started');
+});
+```
+正如我们所看到的，应用程序模块的代码与我们在上一节中用于初始化服务定位器的代码相同。我们还可以注意到，为了引导DI容器，并因此触发整个依赖图的加载，我们仍然需要通过调用`diContainer.get('authController')`将其用作服务定位器。之后，在`DI`容器中注册的每个模块将被自动实例化和连接。
+
+#### DI容器的优点和缺点
+假如我们的模块使用`DI`容器，他有着依赖注入模式大部分优点和缺点。特别是，耦合度更低和可测试性更强，但另一方面，它比单纯的依赖注入模式更复杂，因为我们的依赖关系在运行时解决。一个`DI`容器也与服务定位器模式共享许多属性，但是它有一个事实，即它不强制模块依赖除了它的实际依赖之外的任何额外的模块。这是一个巨大的优势，因为它允许每个模块甚至在没有DI容器的情况下使用，因为可以使用简单的手动注入。
+
+这本质上就是我们在本节中演示的内容：我们使用了纯粹的`DI`模式的认证服务器的版本，然后在不修改任何组件（`app`模块除外）的情况下，我们能够自动地注入每个依赖。
+
+> 在`npm`上，你可以找到很多DI容器 https://www.npmjs.org/search?q=dependency%20injection 。
+
+## 书写插件
+对于软件工程师而言，书写越少的代码越好，通过使用插件来对功能进行拓展。不幸的是，这并不是很容易，书写插件在时间，资源和复杂性方面都有成本。尽管如此，我们还是希望通过书写插件来对系统进行扩展，即使是仅仅针对于系统的某些部分。但就是在这一部分上，我们将要探索怎么书写插件，并关注两个问题：
+
+* 将应用程序服务暴露给插件
+* 将插件集成到应用程序中
+
+### 把插件作为包
+通常在`Node.js`中，应用程序的插件作为包安装到项目的`node_modules`目录中。这样做有两个好处。首先，我们可以利用`npm`的功能来分发插件并管理它的依赖关系。其次，一个包可以有自己的私有依赖关系图，这样可以减少依赖关系之间发生冲突和不兼容的可能性，而不是让插件使用父项目的依赖关系。
+
+以下目录结构给出了一个包含两个作为包分发的插件的应用程序示例：
+
+```
+ application
+   '-- node_modules
+       |-- pluginA
+       '-- pluginB
+```
+
+在`Node.js`中，这是一个非常普遍的做法。 一些流行的例子是用它的中间件[gulp](http://gulpjs.com)，[grunt](http://gruntjs.com)，[nodebb](http://nodebb.org)，[express](http://expressjs.com)和[docpad](http://docpad.org)。
+
+但是，使用包的好处不仅限于外部插件。事实上，一种流行的模式是通过将其组件包装到包中来构建整个应用程序，就好像它们是内部插件一样。因此，我们可以不用在应用程序的主包中组织模块，而是为每个大块功能创建一个单独的包，并将其安装到`node_modules`目录中。
+
+一个包可以是私有的，不一定在公共`npm`可用。我们总是可以将私有组织信息设置到`package.json`中，以防止意外发布到`npm`。 然后，我们可以将这些包提交到一个版本控制系统，比如`git`，或者利用一个私有的`npm`服务器与团队的其他人分享。
