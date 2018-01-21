@@ -8,7 +8,7 @@
 本章探讨的设计模式如下：
 
 * 工厂模式（`Factory`）
-* 揭示模块模式（`Revealing constructor`）
+* 揭示构造模式（`Revealing constructor`）
 * 代理模式（`Proxy`）
 * 装饰者模式（`Decorator`）
 * 适配器模式（`Adapter`）
@@ -263,3 +263,134 @@ const shooter = stampit()
   });
 ```
 
+注意到我们如何使用`props`和`methods`来定义我们的`shooter`工厂函数。
+
+现在我们已经定义了所有的基本类型，我们准备将它们组合起来创建新的更为复杂的工厂函数。
+
+```javascript
+const runner = stampit.compose(character, mover);
+const samurai = stampit.compose(character, mover, slasher);
+const sniper = stampit.compose(character, shooter);
+const gunslinger = stampit.compose(character, mover, shooter);
+const westernSamurai = stampit.compose(gunslinger, samurai);
+```
+
+`stampit.compose()`方法定义了一个新的组合的工厂函数，它的作用是根据组合工厂函数的方法和属性生成一个对象。 正如你所看到的那样，这是一个强大的机制，使我们能够自由地创建和组合工厂函数。
+
+接下来我们实例化一个新的`westernSamurai`。
+
+```javascript
+const gojiro = westernSamurai();
+gojiro.name = 'Gojiro Kiryu';
+gojiro.move(1, 0);
+gojiro.slash('left');
+gojiro.shoot('right');
+```
+
+这将产生以下输出：
+
+```
+Yojimbo moved to [1, 0]
+Yojimbo slashed to the left
+Yojimbo shoot to the right
+```
+
+### 实际应用场景
+正如我们所说的，工厂模式在`Node.js`中非常流行，许多软件包只提供用于创建新实例的工厂；常见一些例子如下：
+
+* [Dnode](https://www.npmjs.com/package/dnode)：`Node.js`的远程程序调用（`RPC`）库。如果我们查看它的源代码，我们会看到它的逻辑实际上是实现成一个名为`D`的类；然而，实例并没有暴露给外界，因为唯一的接口是工厂，这使我们能够使用它创建类的新实例。你可以看看它的源代码。
+
+* [Restify](https://npmjs.org/package/restify)：这是一个构建`REST API`的框架，它允许我们使用`restify.createServer()`工厂函数创建一个服务器的新实例，该工厂在内部创建一个新的实例`Server`类（不导出）。 你可以看看它的源代码。
+
+其他模块公开了一个类和一个工厂，但将工厂作为创建新实例的主要方法或最方便的方法；一些例子如下：
+
+* [http-proxy](https://npmjs.org/package/http-proxy)：这是一个可编程`HTTP`的代理库，用`httpProxy.createProxyServer(options)`创建新的实例。
+* `Node.js`核心模块之`HTTP`：这是新实例主要使用`http.createServer()`创建的地方，但这实际上是`new http.Server()`的简写方式。
+* [bunyan](https://npmjs.org/package/bunyan)：这是一个广泛使用的日志记录库；在其`README`文件中，要求这个仓库的`contributors`需要使用工厂函数`bunyan.createLogger()`作为创建新实例的主要方法，即使这相当于运行`new bunyan()`。
+
+其他一些模块也提供了一个工厂函数来封装其组件实例的创建。常见的例子是`through2`和`from2`（我们在`Chapter 5-Coding with Streams`看到过它），它允许我们使用工厂方法简化新`Streams`的创建，从而显式地使用继承和`new`运算符。
+
+还有一些使用`stamp`规范和组合工厂模式的模块，可以看看[react-stampit](https://www.npmjs.com/package/react-stampit)，它在前端使用组合工厂模式，使您可以轻松地组合组件功能，[remitter](https://www.npmjs.com/package/remitter)，一个基于`Redis`的`pub / sub`模块。
+
+## 揭示构造函数模式（`Revealing constructor`）
+揭示构造函数模式是一个相对较新的模式，在`Node.js`社区和`JavaScript`中越来越受到重视，特别是因为它在一些核心库（如`Promise`）中使用。
+
+我们已经在`Chapter4-Asynchronous Control Flow Patterns with ES2015 and Beyond`中隐含地看到了这种模式，但是我们再回过头来分析一下`Promise`构造函数，以更详细地描述它：
+
+```javascript
+const promise = new Promise(function(resolve, reject) {
+  // ...
+});
+```
+
+正如你所看到的，`Promise`接受一个函数作为构造函数的参数，这被称为执行函数。这个函数是由`Promise`构造函数的内部实现调用的，它提供给构造函数，用于处理`pending`状态的`promise`的内部状态。换句话说，它确定了一个方式来调用`resolve`和`reject`函数，`promise`遵循这个机制，调用`resolve`和`reject`来改变对象的内部状态。
+
+这样做的好处是只有构造函数的参数函数才有权`resolve`和`reject`，一旦构造了`Promise`对象，就可以安全地传递；没有其他代码将能够调用`resolve`或`ject`，来改变`Promise`的内部状态。
+这就是为什么这个模式被`Domenic Denicola`的一篇博客文章命名为揭示构造函数模式的原因。
+
+### 一个只读的`event emitter`
+在这一段中，我们将使用揭示构造函数模式来构建一个只读的`event emitter`，这是一种特殊类型的`event emitter`，在这个`event emitter`内部方法，不允许调用`emit`方法，只有传递给构造函数的函数参数才能够调用`emit`方法。
+
+让我们将`Roee`类的代码写入名为`roee.js`的文件中：
+
+```javascript
+const EventEmitter = require('events');
+module.exports = class Roee extends EventEmitter {
+  constructor(executor) {
+    super();
+    const emit = this.emit.bind(this);
+    this.emit = undefined;
+    executor(emit);
+  }
+};
+```
+
+在这个简单的类中，我们扩展了核心模块`EventEmitter`类，其接受一个`executor`函数作为构造函数的唯一参数。
+
+在构造函数内部，我们调用`super`函数来确保通过调用其父构造函数来正确地初始化`event emitter`，然后保存`emit`函数的备份，并通过为其分配`undefined`来删除它。
+
+最后，我们通过传递`emit`方法备份作为参数来调用`executor`函数。
+
+这里要了解的重要一点是，在`undefined`被分配给`emit`方法之后，我们不能再从代码的其他部分调用它了。 我们的`emit`的备份版本被定义为一个局部变量，只会被转发给执行器函数。这个机制使我们能够仅在`executor`函数内使用`emit`。
+
+现在让我们使用这个新类来创建一个简单的`ticker`，一个每秒发出一个`tick`并记录所有`tick`发出的数量的类。
+
+这将是我们新的`ticker.js`模块的内容：
+
+```javascript
+const Roee = require('./roee');
+const ticker = new Roee((emit) => {
+  let tickCount = 0;
+  setInterval(() => emit('tick', tickCount++), 1000);
+});
+module.exports = ticker;
+```
+
+正如你在这里看到的，代码量并不大。 我们实例化一个新的`Roee`，并在`executor`函数内传递`emit`作为参数。正是因为我们的`executor`函数接收`emit`作为参数，所以我们可以使用它每秒发出一个新的`tick`事件。
+
+现在我们举例说明如何使用这个模块：
+
+```javascript
+const ticker = require('./ticker');
+ticker.on('tick', (tickCount) => console.log(tickCount, 'TICK'));
+// ticker.emit('something', {}); <-- This will fail
+```
+
+我们使用与任何其他基于`event emitter`的对象相同的`ticker`对象，我们可以用`on`方法附加任意数量的监听器，但是在这种情况下，如果我们尝试使用`emit`方法，那么我们的代码将抛出异常`TypeError: ticker.emit is not a function`。
+
+> 即使这个例子在展示如何使用揭示构造函数模式，但值得一提的是这个事件发生器的只读功能并不是完美的，并且仍然有可能以几种方式绕过它。例如，我们仍然可以通过直接使用原型上的`emit`在我们的`ticker`实例上发出事件，如下所示：
+
+```javascript
+require('events').prototype.emit.call(ticker, 'someEvent', {});
+```
+
+### 实际应用场景
+即使这种模式非常有趣和智能，但实际上，除了`Promise`构造函数以外，很难找到常见的应用实例。
+
+值得一提的是，现在`Streams`议案中有一个新的规范，可以尝试使用揭示构造函数模式替代现今的模板模式，以便能够描述各种`Streams`对象的行为：可以看 https://streams.spec.whatwg.org/ 
+
+另外需要指出的是，在之前`Chapter 5-Coding with Streams`当我们实现了`ParallelStream`类的时候。这个类作为构造函数参数接受`userTransform`函数作为参数（`executor`）。
+
+即使在这种情况下，`executor`函数在构建时不被调用，但在`Streams`的内部`_transform()`方法中，揭示构造函数模式的一般概念仍然有效。实际上，这种方法允许我们在创建一个新的`ParallelStream`实例时，将`Streams`的一些内部方法（例如`push`函数）暴露给`executor`函数，使得我们在调用构造函数创建`ParallelStream`实例时执行与内部方法相关的一些操作。
+
+##代理模式（`Proxy`）
