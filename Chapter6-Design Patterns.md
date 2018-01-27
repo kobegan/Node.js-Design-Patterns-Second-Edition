@@ -393,4 +393,222 @@ require('events').prototype.emit.call(ticker, 'someEvent', {});
 
 即使在这种情况下，`executor`函数在构建时不被调用，但在`Streams`的内部`_transform()`方法中，揭示构造函数模式的一般概念仍然有效。实际上，这种方法允许我们在创建一个新的`ParallelStream`实例时，将`Streams`的一些内部方法（例如`push`函数）暴露给`executor`函数，使得我们在调用构造函数创建`ParallelStream`实例时执行与内部方法相关的一些操作。
 
-##代理模式（`Proxy`）
+## 代理模式（`Proxy`）
+代理是一个控制访问另一个被称为主体对象的对象。代理对象和主体对象有一套相同的接口，这使得在使用代理的过程中，对于使用者而言是透明的。这种模式称为代理模式。代理拦截了所有要在主体对象上进行的操作，并增强或补充主体对象的行为。如图所示：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-25/4709175.jpg)
+
+上图给我们展示了代理对象和主体对象具有相同的接口，以及这对客户端来说是如何完全透明的，客户端可以互换地使用其中一个。代理将每个操作转发给主体，通过额外的预处理或后处理来增强其行为。
+
+> 要注意的是，我们并不是在讨论对于不同类需要实现不同的代理。代理模式要求代理对象需要保持各自主体的状态。
+
+代理在几种情况下是有用的；例如，考虑以下几点情况：
+
+* 数据验证：在代理向主体转发数据前验证其数据输入的合法性。
+* 安全性：代理验证客户端是否有权限，仅仅当有权限时才会向主体对象发送相关请求。
+* 缓存：代理对象保存内部缓存，仅仅当缓存未命中时才向主体对象发送相关请求。
+* 懒加载：如果主体对象的创建需要消耗大量资源，代理可以推迟创建主体对象的时机，仅仅当需要主体对象时才创建主体对象。
+* 日志：代理拦截方法和对应的参数调用，并在他们执行前后实现日志打印。
+* 远程对象：代理可以接收远程对象，并使得其呈现为本地对象。
+
+当然，代理模式还有更多的应用，但以上这些应该能让我们了解其主要用途。
+
+### 实现代理的技术
+当代理一个对象时，我们可以拦截所有的方法，或者只拦截其中的一些，而把其余的直接委托给主体对象。有几种方法可以实现这一点。让我们来分析其中的一些方法。
+
+#### 对象组合
+对象组合是一种将对象与另一个对象组合起来的技术，便于扩展或使用其中一个对象功能。对于代理模式而言，创建具有与主体对象相同接口的新对象，并且对该主体的引用以实例变量或闭包变量的形式存储在代理内部。
+
+主体对象可以在创建时从客户端注入，也可以由代理自己创建。
+
+以下是使用伪类和工厂模式创建代理对象的一个例子：
+
+```javascript
+function createProxy(subject) {
+  const proto = Object.getPrototypeOf(subject);
+
+  function Proxy(subject) {
+    this.subject = subject;
+  }
+  Proxy.prototype = Object.create(proto);
+  //proxied method
+  Proxy.prototype.hello = function() {
+    return this.subject.hello() + ' world!';
+  };
+  //delegated method
+  Proxy.prototype.goodbye = function() {
+    return this.subject.goodbye
+      .apply(this.subject, arguments);
+  };
+  return new Proxy(subject);
+}
+module.exports = createProxy;
+```
+
+为了使用对象组合实现代理，我们必须拦截我们需要的方法（比如`hello()`），对于我们不需要的方法，则委托给主体对象调用（例如`goodbye()`方法）。
+
+前面的代码也显示了主体对象有一个原型的特定情况，我们希望维护正确的原型链，以便执行代理`instanceof Subject`将返回`true`；我们使用继承来实现这一点。
+
+这只是一个额外的步骤，当我们想要保持原型链时，才需要这个步骤，这对于改进代理的兼容性有用的。
+
+但是，由于`JavaScript`具有动态类型，大多数情况下我们可以避免使用继承，并使用更直接的方法。例如，前面的代码中提供的代理的另一种实现，可能只使用对象字面量和工厂模式：
+
+```javascript
+function createProxy(subject) {
+  return {
+    // 代理方法
+    hello: () => (subject.hello() + ' world!'),
+    // 委托方法
+    goodbye: () => (subject.goodbye.apply(subject, arguments))
+  };
+}
+```
+
+> 如果我们想创建一个委托其大部分方法的代理，那么使用称为[delegates](https://npmjs.org/package/delegates)自动生成这些代理会很方便。
+
+#### 对象增强
+对象增强是实现代理模式最佳的方式，通过用在代理对象上实现替换方法来直接修改对象；看下面的例子：
+
+```javascript
+function createProxy(subject) {
+  const helloOrig = subject.hello;
+  subject.hello = () => (helloOrig.call(this) + ' world!');
+  return subject;
+}
+```
+
+当我们需要实现的代理只有一个或几个方法的时候，这个技术绝对是最方便的，但是它有一个缺点，就是直接修改主体对象。
+
+#### 不同技术的比较
+对象组合被认为是创建代理的最安全的方式，因为它可以在不改变主体对象的原始行为的情况下创建代理。它唯一的缺点是我们必须手动委托所有的方法，即使我们只想代理其中的一个方法。如果需要的话，我们可能还必须委托访问主体对象的属性。
+
+> 对象原型能够通过使用`Object.defineProperty()`被委托，可以查看[Object.defineProperty()的文档](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Object/defineProperty)
+
+对于对象增强而言，可能我们并不是总想要修改主体对象，但是它没有出现在委派方法中出现的种种不便。为此，对象增强是 用`JavaScript`实现代理最实用的方式，如果修改主体对象不会导致大问题，对象增强是首选的技术。
+
+然而，至少有一种情况下，对象组合几乎是必需的；这就是我们想要控制主体对象的初始化时，例如，只在需要它的时候才创建(懒加载)。
+
+> 值得指出的是，通过使用工厂函数（在我们的例子中是`createProxy()`），我们可以将代码从用于生成代理。
+
+### 创建一个可写入的日志流
+为了实现一个代理模式的例子，现在我们创建一个可写入`Streams`的例子，通过拦截对`write()`函数的全部调用，然后对于每次调用记录一条信息。我们会使用对象组合来实现我们的代理，创建一个`loggingWritable.js`文件来实现：
+
+```javascript
+const fs = require('fs');
+
+function createLoggingWritable(writableOrig) {
+  const proto = Object.getPrototypeOf(writableOrig);
+
+  function LoggingWritable(writableOrig) {
+    this.writableOrig = writableOrig;
+  }
+
+  LoggingWritable.prototype = Object.create(proto);
+
+  LoggingWritable.prototype.write = function(chunk, encoding, callback) {
+    if(!callback && typeof encoding === 'function') {
+      callback = encoding;
+      encoding = undefined;
+    }
+    console.log('Writing ', chunk);
+    return this.writableOrig.write(chunk, encoding, function() {
+      console.log('Finished writing ', chunk);
+      callback && callback();
+    });
+  };
+
+  LoggingWritable.prototype.on = function() {
+    return this.writableOrig.on
+      .apply(this.writableOrig, arguments);
+  };
+
+  LoggingWritable.prototype.end = function() {
+    return this.writableOrig.end
+      .apply(this.writableOrig, arguments);
+  };
+
+  return new LoggingWritable(writableOrig);
+}
+```
+
+在前面的代码中，我们创建了一个返回代理对象的代理版本的工厂函数，工厂函数需要传递主体对象作为参数。我们覆盖了`write()`方法，每次调用`write()`时都会将消息记录到标准输出，并且每次异步操作完成时都会记录消息。这也是创建异步函数的代理的一个很好的例子，因为我们知道代理回调函数也是必要的。这是在诸如`Node.js`的平台中要考虑的重要细节。 其余的方法`on()`和`end()`只是委托给原来的可写入的`Streams`（为了让代码更加精简，我们没有考虑可写入接口的其他方法）。
+现在我们可以在`loggingWritable.js`模块中添加几行代码来测试我们刚创建的代理：
+
+```javascript
+const writable = fs.createWriteStream('test.txt');
+const writableProxy = createLoggingWritable(writable);
+
+writableProxy.write('First chunk');
+writableProxy.write('Second chunk');
+writable.write('This is not logged');
+writableProxy.end();
+
+```
+
+因为使用对象组合，这个代理不会改变`Streams`或者它的外部行为的原有接口，如果我们运行前面的代码，我们现在回看到每个数据块写入`Streams`的过程透明地写到控制台中。
+
+### 代理生态-函数钩子和AOP
+在众多的设计模式中，代理模式在`Node.js`以及生态系统中都是相当流行的模式。实际上，我们可以找到几个允许我们简化代理创建的库，大部分时间利用对象增强作为实现方法。在社区中，这个模式也可以称为函数挂钩，或者有时称为面向方面的编程（`AOP`），它实际上是代理的一个常见应用领域。在`AOP`中，这些库通常允许开发人员为特定方法（或一组方法）设置执行前或执行后钩子，这些方法允许我们分别在执行建议的方法之前和之后执行自定义代码。
+
+有时，代理也被称为中间件，因为在中间件模式中（我们将在本章后面会看到），它们允许我们对函数的输入/输出进行预处理和后处理。有时，他们也允许使用类似中间件的管道为同一方法注册多个钩子。
+
+在`npm`上有几个库允许我们用很少的努力实现函数钩子。其中有[hooks](https://npmjs.org/package/hooks)，[hooker](https://npmjs.org/package/hooker)，和[meld](https://npmjs.org/package/meld)。
+
+### ES2015的Proxy
+`ES2015`规范引入了一个名为`Proxy`的全局对象，它可以从开始在`Node.js v6.0`中使用。
+
+`Proxy API`包含一个`Proxy`构造函数，它接受一个`target`和一个`handler`作为参数：
+
+```javascript
+const proxy = new Proxy(target, handler);
+```
+
+这里，`target`表示应用代理的对象（我们的规范定义的主体对象），而`handler`是定义代理行为的特殊对象。
+
+`handler`对象包含一系列具有预定义名称的可选方法，这些方法称为陷阱方法（例如，`apply`，`get`，`set`和`has`），这些方法在代理实例上执行相应的操作时会自动调用。
+
+为了更好地理解这个`API`的工作原理，我们来看一个例子：
+
+```javascript
+const scientist = {
+  name: 'nikola',
+  surname: 'tesla'
+};
+const uppercaseScientist = new Proxy(scientist, {
+  get: (target, property) => target[property].toUpperCase()
+});
+console.log(uppercaseScientist.name, uppercaseScientist.surname);
+// NIKOLA TESLA
+```
+
+在这个例子中，我们使用`Proxy API`来拦截对目标对象`scientist`属性的所有访问，并将属性的原始值转换为大写字符串。
+
+如果你仔细看看这个例子，你可能会注意到这个`API`的一些特别的东西：它允许我们拦截对目标对象的通用属性的访问。这是可能的，因为`API`不仅仅是一个简单的包装来促进代理对象的创建，就像我们在本章前面部分所定义的那样；相反，它是深入集成到`JavaScript`语言本身的一个特性，它使开发人员能够拦截和定制可以在对象上执行的许多操作。这个特性开创了一些新的有趣的场景，这些场景在元编程，运算符重载和对象虚拟化之前是不容易实现的。
+
+我们来看另一个例子来阐述这个概念：
+
+```javascript
+const evenNumbers = new Proxy([], {
+  get: (target, index) => index * 2,
+  has: (target, number) => number % 2 === 0
+});
+console.log(2 in evenNumbers); // true
+console.log(5 in evenNumbers); // false
+console.log(evenNumbers[7]); // 14
+```
+
+在这个例子中，我们正在创建一个包含所有偶数的虚拟数组。它可以作为常规数组使用，这意味着我们可以使用常规数组语法访问数组中的每一项（例如，`evenNumbers[7]`），或者使用`in`运算符检查数组中是否存在元素（例如，偶数中有`2`个）。该数组被认为是虚拟的，因为我们从不在其中存储数据。
+看一下这个实现，这个代理使用一个空的数组作为目标，然后在处理程序中定义陷阱`get`和`has`：
+
+get陷阱拦截对数组元素的访问，返回给定索引的双倍，而是拦截`in`运算符的用法，并检查给定的数字是否是偶数。
+
+`Proxy API`支持一些其他有趣的陷阱，如`set`，`delete`，和`construct`，并允许我们创建代理，可以根据需要撤销，禁用所有的陷阱和恢复`target`对象的原始行为。
+
+分析所有这些功能超出了本章的范围。这里重要的是理解`Proxy API`提供了一个强大的基础，以便在需要时利用代理模式。
+
+> 如果您想了解更多关于`Proxy API`的知识并发现其所有功能和陷阱方法，请参阅`Mozilla`的本文中的更多内容： https://developer.mozilla.org/it/docs/Web/JavaScript/Reference/Global_Objects/Proxy 。 另一个很好的来源是来自`Google`的详细文章： https://developers.google.com/web/updates/2016/02/es2015-proxies 。
+
+### 实际应用场景
+[Mongoose](http://mongoosejs.com)是`MongoDB`的一个流行的对象文档映射（`ODM`）库。 在内部，它使用[hooks](https://npmjs.org/package/hooks)为`init`，`validate`，`save`和`remove`函数提供预处理和后处理的钩子函数。有关官方文档，请参阅[Mongoose的官方文档](http://mongoosejs.com/docs/middleware.html)。
+
+## 装饰者模式（`Decorator`）
