@@ -1324,7 +1324,532 @@ jsonConfig.save('samples/conf_mod.json');
 ### 实际应用场景
 这种模式不应该听起来对我们来说是全新的。我们已经在`Chapter 5-Coding with Streams`时遇到过它，当我们扩展不同的`Streams`类来实现我们的自定义流。在这种情况下，模板方法是`_write()`，`_read()`，`_transform()`或`_flush()`方法，具体取决于我们想要实现的流类。要创建一个新的自定义流，我们需要从一个特定的抽象流类继承，为模板方法提供一个实现。
 
+## 命令模式（`Command`）
+命令模式是在`Node.js`中另一个重要的设计模式。在其最通用的定义中，命令模式封装了主体对象信息，并对主体对象执行一个动作，而不是在主体对象上直接调用一个方法或一个函数，我们创建一个对象`invocation`执行这样一个
+调用；那么实现这个意图将是另一个组件的责任，将其转化为实际行动。传统上，这个模式是围绕着四个主要的组件，如下图所示：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-29/15135390.jpg)
+
+命令模式的典型组织可以描述如下：
+* `Command`：这是封装调用一个必要信息的对象方法或功能。
+* `Client`：这将创建该命令并将其提供给调用者。
+* `Invoker`：这是负责执行目标上的命令。
+* `Target`（或`Receiver`）：这是调用的主题。它可以是一个单独的功能或对象的方法。
+
+正如我们将看到的，这四个组件可以根据我们想要的方式变化很多实施模式；在这一点上，这听起来不是什么新鲜事。使用命令模式而不是直接执行一个操作有好几个。
+
+优点和应用：
+
+* 命令可以安排在稍后执行。
+* 一个命令可以很容易地序列化并通过网络发送。这很简单，属性允许我们在远程机器上分配作业，传输命令
+* 从浏览器到服务器，创建`RPC`系统等等。
+* 通过命令可以很容易地在系统上保存所有执行的操作历史记录。
+* 命令是一些数据同步算法的重要组成部分和解决冲突。
+* 计划执行的命令如果尚未执行，则可以取消。它
+也可以恢复（撤消），使应用程序的状态的重点
+在命令执行之前。
+* 几个命令可以组合在一起。这可以用来创建原子交易或实施一个机制，从而在所有的操作组立即执行。
+* 可以对一组命令执行不同类型的转换，例如
+作为重复删除，加入和拆分，或应用更复杂的算法如 `Operational Transformation` (`OT`)，这是当今大多数的基础实时协作软件，如协同文本编辑。
+
+前面的列表清楚地向我们展示了这种模式的重要性，特别是在`node.js`这样的平台中，网络和异步执行是必不可少的参与者。 
+
+### 灵活模式
+正如我们已经提到的，`JavaScript`中的命令模式可以通过许多不同的方式实现；我们现在只演示其中的几个，只是为了给出它的范围的概念。 
+
+### 任务模式
+我们可以从最基本的和平凡的实现开始：任务模式。当然，`JavaScript`中创建一个表示调用的对象的最简单方法是创建一个关闭： 
+```javascript
+function createTask(target, args) {
+  return () => {
+    target.apply(null, args);
+  }
+}
+```
+这看起来一点也不新鲜；我们已经在书中多次使用了这种模式，特别是在第3章，带有回调的异步控制流模式中。这种技术允许我们使用单独的组件来控制和调度任务的执行，这在本质上等同于命令模式的调用者。例如，您还记得我们是如何定义传递给异步库的任务的吗？或者更好的是，你还记得我们是如何结合使用发电机的吗？回调模式本身可以被认为是命令模式的一个非常简单的版本。 
+
+### 较复杂的命令模式
+现在让我们来处理一个更复杂的命令的示例；这一次我们希望支持撤消和序列化。让我们从命令的目标开始，这个小对象负责向Twitter这样的服务发送状态更新。为了简单起见，我们使用这种服务的模拟：
+```javascript
+const statusUpdateService = {
+  statusUpdates: {},
+  sendUpdate: function(status) {
+    console.log('Status sent: ' + status);
+    Design Patterns
+      [252]
+    let id = Math.floor(Math.random() * 1000000);
+    statusUpdateService.statusUpdates[id] = status;
+    return id;
+  },
+  destroyUpdate: id => {
+    console.log('Status removed: ' + id);
+    delete statusUpdateService.statusUpdates[id];
+  }
+};
+```
+
+现在，让我们创建一个命令来表示新状态更新的发布： 
+```javascript
+function createSendStatusCmd(service, status) {
+  let postId = null;
+  const command = () => {
+    postId = service.sendUpdate(status);
+  };
+  command.undo = () => {
+    if (postId) {
+      service.destroyUpdate(postId);
+      postId = null;
+    }
+  };
+  command.serialize = () => {
+    return {
+      type: 'status',
+      action: 'post',
+      status: status
+    };
+  };
+  return command;
+}
+```
+前面的函数是一个工厂，它生成新的`sendstate`命令。每个命令实现以下三个功能： 
+1. 命令本身是一个函数，当调用它时，它将触发操作；换句话说，它实现了我们前面看到的任务模式。该命令在执行时将使用目标服务的方法发送新的状态更新。
+2. 连接到主任务的`auto()`函数，该函数恢复操作的效果。在我们的例子中，我们只是调用目标服务上的`deadyupdate()`方法。
+3. `serialize()`函数，它构建一个`json`对象，该对象包含重建同一个命令对象所需的所有信息。 
+在此之后，我们可以构建一个调用程序；我们可以通过实现它的构造函数和它的`run()`方法来开始： 
+```javascript
+class Invoker {
+  constructor() {
+    this.history = [];
+  }
+  run(cmd) {
+    this.history.push(cmd);
+    cmd();
+    console.log('Command executed', cmd.serialize());
+  }
+}
+```
+前面定义的`run()`方法是`Invoker`的基本功能；它负责将命令保存到`history`实例变量中，然后触发命令本身的执行。接下来，我们可以添加一个延迟执行命令的新方法：
+```javascript
+delay(cmd, delay) {
+  setTimeout(() => {
+    this.run(cmd);
+  }, delay)
+}
+```
+然后，我们可以实现一个`undo()`方法来恢复最后一个命令：
+```javascript
+undo() {
+  const cmd = this.history.pop();
+  cmd.undo();
+  console.log('Command undone', cmd.serialize());
+}
+```
+最后，我们还希望能够在远程服务器上运行命令，方法是使用`Web`服务序列化并通过网络传输命令：
+```javascript
+runRemotely(cmd) {
+  request.post('http://localhost:3000/cmd', {
+      json: cmd.serialize()
+    },
+    err => {
+      console.log('Command executed remotely', cmd.serialize());
+    }
+  );
+}
+```
+既然我们有了命令、调用程序和目标，唯一缺少的组件就是客户端。让我们从实例化`Invoker`开始：
+```javascript
+const invoker = new Invoker();
+```
+然后，我们可以使用以下代码行创建一个命令： 
+```javascript
+const command = createSendStatusCmd(statusUpdateService, 'HI!');
+```
+现在我们有了一个命令，表示状态消息的发布；然后我们可以决定立即发送它：
+```javascript
+invoker.run(command);
+```
+但是，我们犯了一个错误；让我们恢复到时间线的状态，就像发送最后一条消息之前的情况一样：
+```javascript
+invoker.undo();
+```
+我们还可以决定从现在起一小时内发送消息：
+```javascript
+invoker.delay(command, 1000 * 60 * 60);
+```
+或者，我们可以通过将任务迁移到另一台机器来分配应用程序的负载： 
+```javascript
+invoker.runRemotely(command);
+```
+
+![](http://oczira72b.bkt.clouddn.com/18-1-29/37954458.jpg)
+
+我们刚刚创建的一个小例子展示了如何在命令中包装一个操作可以打开一个可能性的世界，这只是冰山一角。 
+
+正如最后的讨论，值得注意的是，只有在真正需要的时候才会使用成熟的命令模式。事实上，我们看到了我们需要编写多少额外的代码来简单地调用`statuupdatesservice`方法；如果我们所需要的只是一个调用，那么一个复杂的命令就会被杀死。但是，如果我们需要安排任务的执行，或者运行异步操作，那么简单的任务模式提供了最好的折衷。如果相反，我们需要更高级的特性，如撤销支持、转换、冲突解决，或者我们前面描述的其他花哨用例之一，那么对命令使用更复杂的表示几乎是必要的。
+
 ## 中间件模式（`Middleware`）
 `Node.js`中最有特色的模式之一绝对是中间件模式。不幸的是，对于没有经验的人来说，这也是最令人困惑的事情之一，特别是来自企业架构的开发人员。疑惑的原因可能与中间件这个术语的含义有关，中间件在企业架构术语中表示各种软件套件，这些软件套件有助于抽象`OS API`，`网络通信`，`内存管理`等较底层的操作，允许开发人员只关注应用程序的商业案例。在这种情况下，中间件回顾了诸如`CORBA`，`Enterprise Service Bus`，`Spring`，`JBoss`等主题，但是在更通用的意义上，它也可以定义任何类型的软件层，它们在低级服务和应用程序字面上是中间的软件）。
 
 ### `Express`的中间件
+在`Node.js`中，[Express](http://expressjs.com)广泛使用中间件模式。在`Express`中，事实上，中间件表示一组服务，通常是函数，它们被组织在一个`pipeline`中，负责处理传入的`HTTP`请求和进行响应。
+
+`Express`是一个非常独特和简约的网络框架。使用中间件模式是一种有效的策略，它允许开发人员轻松创建、分发、添加新功能到当前应用程序。
+
+`Express`中间件是以下形式：
+
+```javascript
+function(req, res, next) { ... }
+```
+
+在这里，`req`是传入的`HTTP`请求，`res`是响应，`next`是当前中间件完成其任务时调用的回调，用来触发`pipeline`中的下一个中间件。`Express`中间件执行的任务包括以下内容：
+
+* 解析请求的`body`
+* 压缩/解压`req`和`res`对象
+* 生成访问日志
+* 管理`sessions`
+* 管理加密的`cookie`
+* 提供跨站请求伪造（`CSRF`）保护
+
+这些都是与应用程序的主要业务逻辑没有严格关联的任务，也不是`Web`服务器最核心的部分；它们是应用程序公共功能的中间件，使得实际的请求处理程序只关注其主要业务逻辑。从本质上讲，这些公共中间件是很有必要的。
+
+### 中间件的模式
+在`Express`中实现中间件的技术并不新鲜，实际上，它可以被看作是拦截过滤器模式和责任链模式的`Node.js`版本。用更一般的术语来说，它也代表了一个`pipeline`。现在的`Node.js`中，中间件这个术语不只是在`Express`框架中广泛使用，而是代表着一种特殊的模式，即一组处理单元，过滤器和处理程序以函数的形式连接起来形成一个异步序列，这个异步序列可以对任何类型数据进行预处理和后处理。这种模式的主要优点是灵活性；实际上，这种模式使我们能够以极低的代价生成`Node.js`基础架构，对于添加应用程序拓展和插件上提供了一种便捷灵活的方式。
+
+> 如果您想了解更多关于拦截过滤器模式，可以阅读下面这篇文章： http://www.oracle.com/technetwork/java/interceptingfilter-142169.html ， 这篇文章也很好地讲述了责任链模式： http://java.dzone.com/articles/design-patterns-uncovered-chain-of-responsibility 
+
+下图显示了中间件模式的组件：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-29/42576752.jpg)
+
+该模式的基本组成部分是中间件管理器，负责组织和执行中间件功能。模式最重要的实现细节如下：
+
+* 新的中间件可以通过调用`use()`函数来注册（这个函数的名字在这个模式的许多实现中是一个常见的约定，但我们可以选择任何名字）。通常情况下，新的中间件只能附加在`pipeline`的末尾，但这不是一个严格的规则。
+* 当接收到新数据进行处理时，注册的中间件在异步顺序执行流程中被调用。`pipeline`中的每个单元接收前一个单元的执行结果作为输入。
+* 每个中间件都可以通过简单地不调用回调或者向回调传递错误来决定停止进一步处理数据。错误情况通常会触发执行另一个专门用于处理错误的中间件序列。
+
+数据如何在`pipeline`中处理和传输没有严格的规定。一般说来处理数据的方式有以下几点：
+
+* 为结果数据增加额外的属性或方法，用于拓展数据
+* 用某种处理的结果替换结果数据
+* 保持数据不变，但总是返回处理结果的副本
+
+如何选取中间件在`pipeline`中传输的策略，取决于中间件管理器的实现方式以及中间件本身执行的处理类型。
+
+### 为`ØMQ`创建一个中间件框架
+现在让我们通过围绕[ØMQ](http://zeromq.org)消息传递库构建一个中间件框架来演示中间件模式。`ØMQ`（也称为`ZMQ`或`ZeroMQ`）提供了一个简单的接口，用于通过各种协议在网络中交换原子消息；它的性能绝佳，其基本的抽象集是专门构建的，以促进自定义消息体系结构的实现。因此，经常选择`ØMQ`来构建复杂的分布式系统。
+
+> 在`Chapter11-Messaging and Integration Patterns`，我们将有机会更详细地分析`ØMQ`的特性。
+
+ØMQ的接口相当低级；它只允许我们为消息使用字符串和二进制缓冲区，所以任何编码或数据的自定义格式都必须由库的用户来实现。
+
+在下一个示例中，我们将构建一个中间件基础结构，以抽象通过`ØMQ`套接字传递的数据的预处理和后处理，以便我们可以透明地处理JSON对象，同时无缝地压缩通过线路传递的消息。
+
+> 在继续该示例之前，请确保按照此`URL`的说明安装`ØMQ`库： http://zeromq.org/intro:get-the-software 。 4.0以上任何版本都应该足够用于这个例子。
+
+#### 中间件管理器
+围绕`ØMQ`构建中间件基础架构的第一步是创建一个组件，负责在中间件管道中处理收到的消息和发送新消息。为此，我们创建一个名为`zmqMiddlewareManager.js`的新模块，并如下定义它：
+
+```javascript
+module.exports = class ZmqMiddlewareManager {
+  constructor(socket) {
+    this.socket = socket;
+    this.inboundMiddleware = []; // [1]
+    this.outboundMiddleware = [];
+    socket.on('message', message => { // [2]
+      this.executeMiddleware(this.inboundMiddleware, {
+        data: message
+      });
+    });
+  }
+
+  send(data) {
+    const message = {
+      data: data
+    };
+
+    this.executeMiddleware(this.outboundMiddleware, message,
+      () => {
+        this.socket.send(message.data);
+      }
+    );
+  }
+
+  use(middleware) {
+    if (middleware.inbound) {
+      this.inboundMiddleware.push(middleware.inbound);
+    }
+    if (middleware.outbound) {
+      this.outboundMiddleware.unshift(middleware.outbound);
+    }
+  }
+
+  executeMiddleware(middleware, arg, finish) {
+    function iterator(index) {
+      if (index === middleware.length) {
+        return finish && finish();
+      }
+      middleware[index].call(this, arg, err => {
+        if (err) {
+          return console.log('There was an error: ' + err.message);
+        }
+        iterator.call(this, ++index);
+      });
+    }
+
+    iterator.call(this, 0);
+  }
+};
+```
+
+在这个类的第一部分，我们定义了这个新组件的构造函数。 它接受一个`ØMQ`套接字作为参数，并且：
+
+1. 创建两个包含我们的中间件函数的空列表，一个用于入站消息，另一个用于出站消息。
+2. 通过将一个新的监听器附加到`message`事件，它立即开始监听来自套接字的新消息。在侦听器中，我们通过执行`inboundMiddleware`管道来处理入站消息。
+
+`ZmqMiddlewareManager`类的下一个方法`send`负责在通过套接字发送新消息时执行中间件。
+
+这次使用`outboundMiddleware`列表中的过滤器处理消息，然后将其传递给`socket.send()`以用于实际的网络传输。
+
+现在，我们来谈谈`use()`方法。这个方法对于将新的中间件功能添加到我们的管道。每个中间件都是成对的；在我们的实现中，它是一个包含`inbound`和`outbound`两个属性的对象，这些属性则是要添加到相应列表的中间件函数。
+
+在这里观察到，`inbound`中间件被`push`到`inboundMiddleware`列表的末尾，而对于`outboundMiddleware`列表，则使用`unshift`在开始处插入`outbound`中间件。这是因为`inbound / outbound`中间件函数通常需要以相反的顺序执行。例如，如果我们想要使用`JSON`解压缩并反序列化`inbound`消息，则意味着对于`outbound`，我们应该首先序列化并压缩。
+
+> 理解这个用于组织中间件的约定不是一般模式的一部分，而只是我们具体例子的一个实现细节。
+
+最后一个函数`executeMiddleware`代表了我们组件的核心，它是负责执行中间件功能的函数。这个函数的代码应该看起来很熟悉， 实际上，它是我们在`Chapter3-Asynchronous Control Flow Patterns with Callbacks`中学习的异步顺序迭代模式的简单实现。作为输入接收的中间件队列中的每个函数被一个接一个地执行，并且为每个中间件功能提供相同的`arg`对象作为参数；这是可以将数据从一个中间件传播到下一个中间件的技巧。在迭代结束时，调用`finish()`回调。
+
+> 为了简洁，我们不支持`error`中间件管道。 通常，当中间件功能传播错误时，执行专门用于处理错误的另一组中间件。这可以使用我们在这里演示的相同技术轻松实现。
+
+#### 支持`JSON`消息的中间件
+现在我们已经实现了中间件管理器，我们可以创建一对中间件函数来演示如何处理`inbound`和`outbound`消息。正如我们所说的，我们的中间件基础架构的目标之一就是拥有一个过滤器来对`JSON`消息进行序列化和反序列化，所以让我们来创建新的中间件来处理这个问题。在一个名为`jsonMiddleware.js`的新模块中，我们包含以下代码：
+
+```javascript
+module.exports.json = () => {
+  return {
+    inbound: function(message, next) {
+      message.data = JSON.parse(message.data.toString());
+      next();
+    },
+    outbound: function(message, next) {
+      message.data = new Buffer(JSON.stringify(message.data));
+      next();
+    }
+  }
+};
+```
+
+我们刚刚创建的`json`中间件非常简单：
+
+* `inbound`中间件将收到的消息反序列化为输入，并将结果返回给消息的`data`属性，以便可以沿管道进一步处理
+* `outbound`中间件序列化`message.data`中的任何数据
+
+请注意我们框架支持的中间件与`Express`中使用的中间件的不同，这是完全正常的，也是我们如何适应这种模式以适应我们特定需求的完美演示。
+
+#### 使用`ØMQ`中间件框架
+我们现在准备使用我们刚刚创建的中间件。为此，我们将构建一个非常简单的应用程序，客户端定期向服务器发送`ping`命令，服务器回显接收到的消息。
+
+从实现的角度来看，我们将使用由`ØMQ`提供的[req/rep套接字对](http://zguide.zeromq.org/page:all#Ask-and-Ye-Shall-Receive)。
+
+然后，我们将使用我们的`zmqMiddlewareManager`套接字来获得我们构建的中间件，包括用于序列化/反序列化`JSON`消息的中间件。
+
+##### 服务端
+首先创建服务器端（`server.js`）。在模块的第一部分，我们初始化我们的组件：
+
+```javascript
+const zmq = require('zmq');
+const ZmqMiddlewareManager = require('./zmqMiddlewareManager');
+const jsonMiddleware = require('./jsonMiddleware');
+const reply = zmq.socket('rep');
+reply.bind('tcp://127.0.0.1:5000');
+```
+
+在前面的代码中，我们加载了所需的依赖关系，并将`ØMQ rep`套接字绑定到本地端口。接下来，我们初始化我们的中间件：
+
+```javascript
+const zmqm = new ZmqMiddlewareManager(reply);
+zmqm.use(jsonMiddleware.json());
+```
+
+我们创建了一个新的`ZmqMiddlewareManager`对象，然后添加了两个中间件，一个用于压缩/解压缩消息，另一个用于解析/序列化`JSON`消息。
+
+> 为简洁起见，我们没有展示`zlib`中间件的实现，但是您可以在本书附带的示例代码中找到它。
+
+现在我们已经准备好处理来自客户的请求。我们将通过简单地添加更多的中间件来完成这个工作，这次使用它作为请求处理程序：
+
+```javascript
+zmqm.use({
+  inbound: function(message, next) {
+    console.log('Received: ', message.data);
+    if (message.data.action === 'ping') {
+      this.send({
+        action: 'pong',
+        echo: message.data.echo
+      });
+    }
+    next();
+  }
+});
+```
+
+由于中间件的最后一项是在`zlib`和`json`中间件之后定义的，因此我们可以透明地使用`message.data`变量中可用的解压缩和反序列化消息。 另一方面，传递给`send()`的任何数据都将由`outbound`中间件处理，在我们的例子中，这个中间件将序列化，然后压缩数据。
+
+##### 客户端
+在应用程序`client.js`客户端，我们首先必须启动一个连接到端口`5000`的新的`ØMQ req`套接字，这个端口是我们服务器使用的端口：
+
+```javascript
+const zmq = require('zmq');
+const ZmqMiddlewareManager = require('./zmqMiddlewareManager');
+const jsonMiddleware = require('./jsonMiddleware');
+const request = zmq.socket('req');
+request.connect('tcp://127.0.0.1:5000');
+```
+
+然后，我们需要像我们为服务器一样设置我们的中间件框架：
+
+```javascript
+const zmqm = new ZmqMiddlewareManager(request);
+zmqm.use(jsonMiddleware.json());
+```
+
+接下来，我们创建一个中间件`inbound`项来处理来自服务器的响应：
+
+```javascript
+zmqm.use({
+  inbound: function(message, next) {
+    console.log('Echoed back: ', message.data);
+    next();
+  }
+});
+```
+
+在前面的代码中，我们只需拦截任何`inbound`响应并将其打印到控制台。
+
+最后，我们建立一个定时器来定时发送一些`ping`请求，总是使用`zmqMiddlewareManager`来获得我们中间件的所有优点：
+
+```javascript
+setInterval(() => {
+  zmqm.send({
+    action: 'ping',
+    echo: Date.now()
+  });
+}, 1000);
+```
+
+请注意，我们正在使用`function`关键字明确定义所有`inbound`和`outbound`函数，避免使用箭头函数语法。这是故意的，因为正如我们在`Chapter1-Welcome to the Node.js Platform`，箭头函数声明将函数范围阻塞到它的词法范围。对使用箭头函数定义的函数使用调用不会改变其内部作用域。换句话说，如果我们使用箭头函数，我们的中间件将不会将其识别为`zmqMiddlewareManager`的一个实例，并且会引发错误`TypeError: this.send is not a function`。
+
+我们现在可以通过首先启动服务器来尝试我们的应用：
+
+```bash
+node server
+```
+
+然后我们可以用下面的命令启动客户端：
+
+```bash
+node client
+```
+
+在这一点上，我们应该看到客户端发送消息和服务器回显他们。
+
+我们的中间件框架完成了它的工作。它允许我们透明地解压缩/压缩和反序列化/序列化我们的消息，让`handler`程序专注于他们的业务逻辑！
+
+### 在`Koa`中使用`Generator`的中间件
+在前面的段落中，我们看到了如何使用回调实现中间件模式，并将示例应用于消息传递系统。
+
+正如我们在介绍它时看到的那样，中间件模式在`Web`框架中真正发挥作为一种便利的机制，可以构建可以在应用程序核心中处理输入和输出数据流的逻辑“层”。
+
+除了`Express`之外，另一个大量使用中间件模式的`Web`框架是[Koa](http://koajs.com/)。`Koa`是一个非常有趣的框架，主要是因为它的激进选择是只使用`ES2015`生成器函数而不是使用回调来实现中间件模式。我们马上就会看到这个选择如何大大简化了中间件的编写方式，但是在转移到一些代码之前，我们可以用另一种方式来形象化中间件模式，特定于这个`Web`框架：
+
+![](http://oczira72b.bkt.clouddn.com/18-1-29/19599475.jpg)
+
+在这个表示中，我们有一个传入的请求，在进入我们的应用程序的核心之前，遍历一些中间件。这部分流程称为`inbound`或`downstream`。流程到达应用程序的核心后，再遍历所有的中间件，但这次是以相反的顺序。这允许中间件在应用的主逻辑已经被执行并且响应准备好被发送给用户之后执行其他动作。 这部分流量被称为`outbound`或`upstream`。
+
+由于中间件包装核心应用程序的方式，上面的表示有时被称为程序员的“洋葱”，这让我们想起了洋葱的层次。
+
+现在，让我们用`Koa`创建一个新的`Web`应用程序，以了解如何使用生成器函数轻松编写定制的中间件。
+
+我们的应用程序将是一个非常简单的`JSON API`，它返回我们服务器中的当前时间戳。
+
+首先，我们需要安装`Koa`：
+
+```bash
+npm install koa
+```
+
+然后我们可以写我们的新`app.js`：
+
+```javascript
+const app = require('koa')();
+app.use(function*() {
+  this.body = {
+    "now": new Date()
+  };
+});
+app.listen(3000);
+```
+
+需要注意的是，我们的应用程序的核心是在`app.use`调用中使用`Generator`函数定义的。我们稍后会看到中间件以完全相同的方式添加到应用程序中，并且我们将认识到，我们的应用程序的核心是最后添加到应用程序的中间件（并且不需要依赖于另一个中间件 以下项目的中间件）。
+
+我们的应用程序的初稿已经准备就绪。 我们现在可以运行它：
+
+```bash
+node app.js
+```
+
+然后，我们将浏览器指向`http://localhost:3000`，以查看它。
+
+请注意，`Koa`会将响应转换为`JSON`字符串，并在将`JavaScript`对象设置为当前响应的主体时添加正确的内容类型标头。
+
+我们的`API`运行良好，但是现在我们可能会决定保护它免受滥用，确保人们在一秒钟内完成多个请求。 这个逻辑可以被认为是我们`API`的业务逻辑的外部，所以我们应该通过简单地写一个新的专用中间件来添加它。我们把它写成一个叫做`rateLimit.js`的独立模块：
+
+```javascript
+const lastCall = new Map();
+
+module.exports = function *(next) {
+
+  // inbound
+  const now = new Date();
+  if (lastCall.has(this.ip) && now.getTime() - lastCall.get(this.ip).getTime() < 1000) {
+    return this.status = 429; // Too Many Requests
+  }
+
+  yield next;
+
+  // outbound
+  lastCall.set(this.ip, now);
+  this.set('X-RateLimit-Reset', now.getTime() + 1000);
+};
+```
+
+我们的模块导出一个实现我们中间件逻辑的生成器函数。
+
+首先要注意的是，我们使用`Map`对象来存储从给定`IP`地址接收到最后一次呼叫的时间。我们将使用这个`Map`作为一种内存数据库，能够检查一个特定的用户是否每秒钟以超过一个请求来超载我们的服务器。当然，这个实现仅仅是一个虚拟的例子，在真实的情况下这并不理想，只使用外部存储（如`Redis`或`Memcache`）和更精确的逻辑来检测过载。
+
+我们可以看到，中间件的主体被分成两个逻辑部分，`inbound`和`outbound`，与下一个`yield`的分离。在`inbound`部分，我们还没有走到应用程序的核心，所以这是我们需要检查用户是否超出我们的费率限制的地方。如果是这样，我们只需将响应的`HTTP`状态码设置为`429`（`too many requests`），我们返回来停止`pipeline`的执行。
+
+另一个我们可以进入下一个中间件的方法是通过`next`调用`yield`。使用`Generator`函数和`yield`，中间件的执行被暂停，以执行列表中的所有其他中间件，并且只有当中间件的最后一项被执行时（应用程序的真正核心）`outbound`流程可以开始，并且以相反的顺序将控制权交还给每个中间件，直到第一个中间件再次被调用。
+
+当我们的中间件再次接收到控制信号并且恢复`Generator`功能时，我们需要保存成功调用的时间戳，并且在请求中添加一个`X-RateLimit-Reset`头，以表示用户何时能够创建一个新的请求。
+
+> 如果你需要一个更完整和可靠的限速中间件的实现，你可以看看`koajs/ratelimit`模块，https://github.com/koajs/ratelimit  
+
+为了启用这个中间件，我们需要在包含我们应用的核心逻辑的现有`app.use`之前在我们的`app.js`中添加以下行：
+
+```javascript
+app.use(require('./rateLimit'));
+```
+
+现在看到我们的新应用程序在运行，我们需要重新启动我们的服务器，再次打开我们的浏览器。如果我们快速刷新页面几次，我们可能会达到速率限制，我们应该看到描述错误消息“太多请求”。由于将状态码设置为`429`并具有空的响应主体，`Koa`自动添加此消息。
+
+> 如果您有兴趣阅读基于`Koa`框架中使用的生成器的中间件模式的实际实现，您可以查看[koajs/compose](https://github.com/koajs/compose)，它是核心模块用于将一组`Generator`转换成一个新的`Generator`，该`Generator`在`pipeline`中执行原始`Generator`。
+
+![](http://oczira72b.bkt.clouddn.com/18-1-29/8965204.jpg)
+
+## 总结
+在本章中，我们了解了如何将一些传统的`GOF`设计模式应用于`JavaScript`，特别是`node.js`。其中一些被转换，一些被简化，另一些被重新命名或被改编，作为它们被语言、平台和社区同化的一部分。我们强调了简单的模式(如工厂模式)如何极大地提高代码的灵活性，以及如何使用代理、装饰器和适配器来操作、扩展和调整现有对象的接口。相反，策略模式、状态模式和模板模式已经向我们展示了如何将更大的算法分解为静态和可变的部分，从而使我们能够提高组件的代码重用性和可扩展性。通过学习中间件模式，我们现在能够使用简单、可扩展和优雅的范例来处理数据。最后，命令模式为我们提供了一个简单的抽象，使任何操作都更加灵活和强大。
+
+除了观察这些被广泛接受的设计模式的`JavaScript`版本，我们还发现了一些在`JavaScript`社区中诞生和提出的新的设计模式，例如揭示构造函数和可组合的工厂函数模式。这些模式有助于处理`JavaScript`语言的特定方面，例如`asynchronicity`和`prototype-based programming`。
+
+最后，我们获得了更多的证据，说明`JavaScript`是如何通过组合不同的可重用对象或函数来完成任务和构建软件的，而不是扩展许多小类或接口。此外，对于来自其他面向对象语言的开发人员来说，看到一些设计模式在`JavaScript`中实现时有多么不同可能会显得很奇怪；有些人可能会感到迷茫，因为知道可能不止一种设计模式，而是许多实现设计模式的不同方式。我们说，`JavaScript`是一种实用的语言，它允许我们快速完成任务，但是，没有任何结构或指导原则，我们就会自找麻烦。这就是这本书，尤其是这一章有用的地方。它试图在创造力和严谨性之间教出正确的平衡。它不仅显示了可以重用的模式来改进我们的代码，而且它们的实现不是最重要的细节；它可能与其他模式有很大的不同，甚至重叠。真正重要的是蓝图、指导方针和模式基础上的想法。这是真正可重用的信息，我们可以利用这些信息以有趣的方式设计更好的`node.js`应用程序。
+
+在下一章中，我们将分析更多的设计模式，重点是编程的一个最有主见的方面：如何将模块组织起来并连接在一起。 
