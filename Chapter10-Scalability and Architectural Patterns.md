@@ -487,3 +487,201 @@ nginx -s reload
 这种模式不仅可以应用于负载平衡，还可以更普遍地作为从提供服务的服务器分离服务类型的一种方式。我们可以将其视为适用于网络服务的服务定位器的设计模式。
 
 #### 使用`http-proxy`和`Consul`实现动态负载均衡器
+为了实现粘性负载均衡，我们可以使用反向代理，例如`Nginx`或`HAProxy`；我们所需要做的就是使用自动服务更新其配置，然后强制负载均衡器选择更改。 对于`Nginx`，可以使用以下命令行完成：
+
+```bash
+nginx -s reload
+```
+
+使用基于云的解决方案可以获得相同的结果，但我们有第三种更熟悉的替代方案，可以使用我们最喜欢的平台。
+
+我们都知道`Node.js`是构建任何网络应用程序的好工具；正如我们所说，这正是其主要设计目标之一。那么，为什么不建立一个只使用`Node.js`的负载均衡器呢？ 这将给我们更多的自由，并允许我们直接在我们的定制负载平衡器中实现任何类型的模式或算法，包括我们现在要探索的负载平衡器，使用服务注册表的动态负载平衡。在这个例子中，我们将使用[Consul](https://www.consul.io)作为服务注册表。
+
+在这个例子中，我们想要复制我们在上一节中看到的多服务体系结构，为此，我们将主要使用三个`npm`包：
+
+* [http-proxy](https://npmjs.org/package/http-proxy)：这是一个库，用于简化`Node.js`中代理和负载均衡器的创建
+* [portfinder](https://npmjs.com/package/portfinder)：这是一个允许发现系统中的自由端口的库
+* [consul](https://npmjs.org/package/consul)：这是一个图书馆，允许服务在`consul`登记
+
+让我们开始实施我们的服务。 它们是简单的`HTTP`服务器，就像我们迄今用来测试`cluster`和`Nginx`的`HTTP`服务器一样，但是这次我们希望每个服务器都在服务注册表启动的时候注册自己。
+
+让我们看看这看起来如何（文件`app.js`）：
+
+```javascript
+const http = require('http');
+const pid = process.pid;
+const consul = require('consul')();
+const portfinder = require('portfinder');
+const serviceType = process.argv[2];
+
+portfinder.getPort((err, port) => {
+  const serviceId = serviceType+port;
+  consul.agent.service.register({
+    id: serviceId,
+    name: serviceType,
+    address: 'localhost',
+    port: port,
+    tags: [serviceType]
+  }, () => {
+
+    const unregisterService = (err) => {
+      consul.agent.service.deregister(serviceId, () => {
+        process.exit(err ? 1 : 0);
+      });
+    };
+
+    process.on('exit', unregisterService);
+    process.on('SIGINT', unregisterService);
+    process.on('uncaughtException', unregisterService);
+
+    http.createServer((req, res) => {
+      for (let i = 1e7; i > 0; i--) {}
+      console.log(`Handling request from ${pid}`);
+      res.end(`${serviceType} response from ${pid}\n`);
+    }).listen(port, () => {
+      console.log(`Started ${serviceType} (${pid}) on port ${port}`);
+    });
+  });
+});
+```
+
+在前面的代码中，有一些部分值得我们关注：
+
+* 首先，我们使用`portfinder.getPort`来发现系统中的一个空闲端口（默认情况下，`portfinder`从`8000`端口开始搜索）。
+* 接下来，我们使用`Consul`库在注册表中注册一项新服务。服务定义需要几个属性：`id`（服务的唯一名称），`name`（标识服务的通用名称），`address`和`port`（用于标识如何访问服务），`tags`（可选的标签数组用于过滤和分组服务）。我们使用`serviceType`（我们将其作为命令行参数）来指定服务名称并添加标签。这将允许我们识别集群中可用的相同类型的所有服务。
+* 此时我们定义了一个名为`unregisterService`的函数，它允许我们在集群中定义相同类型的服务。
+* 我们使用`unregisterService`作为清理函数，以便程序运行时关闭（无论是人为关闭还是意外关闭），从取消注册。
+* 最后，我们为`portfinder`发现的端口上的服务启动`HTTP`服务器。
+
+现在是实施负载均衡器的时候了。 我们通过创建一个名为`loadBalancer.js`的新模块来实现这一点。首先，我们需要定义一个路由表来将`URL`路径映射到服务：
+
+```javascript
+const routing = [{
+  path: '/api',
+  service: 'api-service',
+  index: 0
+}, {
+  path: '/',
+  service: 'webapp-service',
+  index: 0
+}];
+```
+
+`routing`数组中的每个项目都包含用于处理到达映射路径的请求的服务。`index`属性将用于循环给定服务的请求。
+
+让我们通过实现`loadbalancer.js`的第二部分来看看它是如何工作的：
+
+```javascript
+const proxy = httpProxy.createProxyServer({});
+http.createServer((req, res) => {
+  let route;
+  routing.some(entry => {
+    route = entry;
+    //Starts with the route path?
+    return req.url.indexOf(route.path) === 0;
+  });
+
+  consul.agent.service.list((err, services) => {
+    const servers = [];
+    Object.keys(services).filter(id => {
+      if (services[id].Tags.indexOf(route.service) > -1) {
+        servers.push(`http://${services[id].Address}:${services[id].Port}`)
+      }
+    });
+
+    if (!servers.length) {
+      res.writeHead(502);
+      return res.end('Bad gateway');
+    }
+
+    route.index = (route.index + 1) % servers.length;
+    proxy.web(req, res, {target: servers[route.index]});
+  });
+}).listen(8080, () => console.log('Load balancer started on port 8080'));
+
+```
+
+这就是我们如何实现基于`Node.js`的负载均衡器：
+
+1. 首先，我们需要`consul`，以便我们可以访问注册表。接下来，我们实例化一个`http-proxy`对象并启动一个普通的`web`服务器。
+2. 在服务器的请求处理程序中，我们所做的第一件事是将`URL`与我们的路由表进行匹配。 结果将是一个包含服务名称的描述符。
+3. 我们从`consul`获得实施所需服务的服务器清单。如果这个列表是空的，我们会向客户端返回一个错误。我们使用Tag属性来过滤所有可用的服务，并查找实现当前服务类型的服务器的地址。最后，我们可以将请求路由到它的目的地。 我们根据循环法更新route.index以指向列表中的下一个服务器。然后，我们使用索引从列表中选择一个服务器，并将它与请求（`req`）和响应（`res`）对象一起传递给`proxy.web()`。 这将简单地将请求转发到我们选择的服务器。
+
+现在很清楚，仅使用`Node.js`和服务注册表来实现负载均衡器是多么简单，以及我们可以通过这种方式实现多大的灵活性。现在，我们应该准备好了，但首先，请通过以下官方文档安装`Consul`服务器： https://www.consul.io/intro/getting-started/install.html 。
+
+这使我们能够通过这个简单的命令行在我们的开发机器中启动`consul`服务注册表：
+
+```bash
+consul agent -dev
+```
+
+现在我们准备启动负载平衡器：
+
+```bash
+node loadBalancer
+```
+
+现在，如果我们尝试访问负载平衡器公开的某些服务，我们会注意到它返回一个`HTTP 502`错误，因为我们还没有启动任何服务器。亲自尝试一下：
+
+```bash
+curl localhost:8080/api
+```
+
+上述命令应返回以下输出：
+
+```
+Bad Gateway
+```
+
+如果我们产生一些服务实例，情况将会发生变化，例如，两个`api-service`和一个`webapp-service`：
+
+```
+forever start app.js api-service
+forever start app.js api-service
+forever start app.js webapp-service
+```
+
+现在负载平衡器应该自动查看新服务器并开始在它们之间分配请求。 让我们尝试使用以下命令：
+
+```bash
+curl localhost:8080/api
+```
+
+上述命令现在应该返回：
+
+```bash
+api-service response from 6972
+```
+
+通过再次运行它，我们现在应该从另一台服务器收到一条消息，确认请求正在不同服务器之间负载均衡：
+
+```bash
+api-service response from 6979
+```
+
+![](http://oczira72b.bkt.clouddn.com/18-2-25/55815960.jpg)
+
+这种模式的优点是显而易见的。我们现在可以动态，按需或基于时间表调整我们的基础架构，我们的负载均衡器将自动根据新配置进行调整，无需任何额外的工作！
+
+## 点对点负载平衡
+当我们想要将一个复杂的内部网络架构暴露给公共网络（如`Internet`）时，使用反向代理几乎是必需的。它有助于隐藏复杂性，提供外部应用程序可轻松使用和依赖的单一访问点。但是，如果我们需要扩展仅供内部使用的服务，则我们可以拥有更多的灵活性和控制力。
+
+假设有一个服务A依靠服务B来实现其功能。服务B在多台机器上进行缩放，并且只能在内部网络中使用。我们迄今为止所了解到的是，服务A将使用反向代理连接到服务B，反向代理会将流量分发到实施服务B的所有服务器。
+
+但是，还有一个选择。我们可以从图中删除反向代理，并直接从客户端（服务A）分发请求，该客户端现在直接负责跨服务B的各种实例负载平衡其连接。只有服务器A知道详细信息关于暴露服务B的服务器，并且在内部网络中，这通常是已知信息。通过这种方法，我们基本上实现了对等负载均衡。
+
+下图比较了我们刚刚描述的两种替代方案：
+
+![](http://oczira72b.bkt.clouddn.com/18-2-25/98621619.jpg)
+
+这是一种非常简单而有效的模式，可以实现真正的分布式通信，而不会出现瓶颈或单点故障。除此之外，它还执行以下操作：
+
+* 通过删除网络节点来降低基础设施的复杂性
+* 更快的通信，因为消息将通过更少的节点
+* 规模更好，因为性能不受负载平衡器可以处理的限制
+
+另一方面，通过删除反向代理，我们实际上暴露了其底层基础架构的复杂性。此外，通过实施负载平衡算法，每个客户端都必须变得更加智能，并且可能也是保持其基础架构最新的一种方式。
+
+> 点对点负载均衡是[ØMQ](http://zeromq.org)库中广泛使用的一种模式。
+
+### 实现可以跨多台服务器平衡请求的HTTP客户端
