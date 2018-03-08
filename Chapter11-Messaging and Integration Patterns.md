@@ -937,3 +937,91 @@ _listenForResponses() {
 在前面的代码中，我们监听我们明确创建的用于接收响应的队列中的消息，然后为每个传入消息读取关联`ID`，并将它与等待答复的处理程序列表进行匹配。一旦我们有了处理程序，我们只需要通过传递`reply`消息来调用它。
 
 ##### 实现reply
+这就是`amqpRequest`模块。现在是时候在名为`amqpReply.js`的新模块中实现响应对象。
+
+在这里，我们必须保存传入请求的队列；我们可以为此使用一个简单的持久队列。我们不会展示这部分，因为它在所有`AMQP`都具有。我们感兴趣的是看到的是我们如何处理请求，然后将其发送回正确的队列：
+
+```javascript
+class AMQPReply {
+  //...
+  handleRequest(handler) {
+    return this.channel.consume(this.queue, msg => {
+      const content = JSON.parse(msg.content.toString());
+      handler(content, reply => {
+        this.channel.sendToQueue(
+          msg.properties.replyTo, // 这里保存的请求消息的队列
+          new Buffer(JSON.stringify(reply)), {
+            correlationId: msg.properties.correlationId
+          }
+        );
+        this.channel.ack(msg);
+      });
+    });
+  }
+}
+```
+
+在发送`reply`时，我们使用`channel.sendToQueue()`将消息直接发布到消息的`replyTo`属性（我们的返回地址）中指定的队列中。我们的`amqpReply`对象的另一个重要任务是在回复对象中设置`correlationId`，以便接收者可以将消息与挂起的请求列表进行匹配。
+
+##### 实现requestor和replier
+现在一切都准备好了，让我们首先尝试一下，但首先，让我们构建一个样本`requestor`和`replier`，从模块`replier.js`开始：
+
+```javascript
+const Reply = require('./amqpReply');
+const reply = Reply('requests_queue');
+
+reply.initialize().then(() => {
+  reply.handleRequest((req, cb) => {
+    console.log('Request received', req);
+    cb({sum: req.a + req.b});
+  });
+});
+```
+
+可以看到我们构建的模块如何处理关联`ID`和返回地址。我们所需要做的就是初始化一个新的`reply`对象，指定我们希望接收我们请求的队列的名称（`requests_queue`）。我们的样本重新计算接收到的两个数字的总和作为输入，并使用提供的回调函数返回结果。
+
+另一方面，我们在`requestor.js`文件中实现了一个样例`request`：
+
+```javascript
+const req = require('./amqpRequest')();
+
+req.initialize().then(() => {
+  for (let i = 100; i > 0; i--) {
+    sendRandomRequest();
+  }
+});
+
+function sendRandomRequest() {
+  const a = Math.round(Math.random() * 100);
+  const b = Math.round(Math.random() * 100);
+  req.request('requests_queue', {a: a, b: b}, 
+    res => {
+      console.log(`${a} + ${b} = ${res.sum}`);
+    }
+  );
+}
+```
+
+我们的示例请求程序将`100`个随机请求发送到`requests_queue`队列。在这种情况下，有趣的是我们完美地完成了它的工作，隐藏了异步请求/应答模式的所有细节。
+
+现在，要尝试系统，只需运行`replier`程序模块和`requestor`模块：
+
+```bash
+node replier
+node requestor
+```
+
+![](http://oczira72b.bkt.clouddn.com/18-3-7/11271387.jpg)
+
+我们会看到`requestor`发布的一系列操作，然后由`replier`收到，然后回复`response`。
+
+现在我们可以尝试其他实验。一旦`replier`第一次启动，它会创建一个持久队列；这意味着，如果我们现在停止并再次运行请求者，则不会有任何请求丢失。 所有消息都将存储在队列中，直到重新启动重新启动。
+
+这些都是因为我们使用了`AMQP`。 为了测试这个假设，我们可以尝试启动两个或更多的`replier`实例，并观察它们之间的负载平衡请求。这是有效的，因为每次`requestor`启动时，它将自己作为一个监听器附加到同一个持久队列中，结果，代理将负载均衡队列中所有消费者的消息同步到这里。
+
+## 总结
+我们已经到了本章的结尾。在这里，我们了解了最重要的消息传递和集成模式以及它们在分布式系统设计中扮演的角色。我们熟悉了三种主要类型的消息交换模式：发布/订阅，管道和请求/回复，并且我们看到了如何使用对等体系结构或消息代理来实现它们。我们分析了他们的优缺点，我们发现通过使用`AMQP`可以给我们提供更大的便捷，我们可以实现可靠和可扩展的应用程序，而只需很少的开发工作，但需要花费更多系统来维护和扩展我们应用程序。此外，我们看到了`ØMQ`如何让我们构建分布式系统，以便我们可以全面控制架构的每个方面，根据自己的需求对其属性进行微调。
+
+本章是本书的最后一章，到现在为止，我们应该有一个基本概念，以及基本了解了`Node.js`可以用在我们的项目中应用的模式和技术。我们还应该更深入地了解`Node.js`的开发方式，以及它的优缺点。在整本书中，我们也有机会使用到很多别的开发人员开发的包和库和解决方案。最后，这是`Node.js`最漂亮的一个方面：它的人员，一个人人都可以在回馈某些东西时发挥作用的社区。
+
+希望有一天你也可以给`Node.js`社区作出贡献。
